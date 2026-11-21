@@ -3337,6 +3337,30 @@ TEST(ProgramProviderBindingJournal, AnEndpointCallWithoutACostBoundIsRefusedBefo
     }
 }
 
+TEST(ProgramProviderBindingJournal, AnEndpointCallIsRefusedWhenTheLinkedLibraryDoesNotBoundEndpointCalls) {
+    // A library that does not grant the endpoint cost bounds answers every billed endpoint call without a bound, so a
+    // priced binding admits an endpoint call by its bound only from a library that grants them.
+    struct Linked {
+        Linked() {
+            program::detail::set_linked_capabilities_for_testing(sp::runtime::interface_contract().capabilities &
+                                                                 ~sp::capability::EndpointCostBounds);
+        }
+        ~Linked() { program::detail::set_linked_capabilities_for_testing(std::nullopt); }
+    } linked;
+    TempDir                    files("endpoint-unlinked");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    const auto options = priced_endpoint_options(
+        peer.origin(), {embed_model(peer.origin(), json{{"input", std::string(kEmbedInputRate)}})});
+    Host       h(std::make_shared<Peer>(), options, &files);
+    const auto result = h.run(Shape::Embed, "endpoint-unlinked");
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_NE(failure_text(result).find("P_MONEY_UNMODELED"), std::string::npos) << failure_text(result);
+    EXPECT_NE(failure_text(result).find("EndpointCostBounds"), std::string::npos) << failure_text(result);
+    EXPECT_EQ(peer.state->entered, 0U);
+    EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
+    EXPECT_TRUE(result.monetary_records().empty());
+}
+
 TEST(ProgramProviderBindingJournal, ARecoveredRunChargesItsJournaledEmbeddingCallAsStored) {
     // The run dies after its embedding call is journaled. Recovery does not send the call again: it charges the record
     // the call was settled with, as the journal stored it.

@@ -31,6 +31,21 @@
  *     sent: its provider.max_price becomes the route ceiling, or the host's
  *     own cap where that is lower, so the request that is digested, journaled
  *     and sent is the pinned one (prepare_priced_call()).
+ *
+ *     A SchemaProvider endpoint call (embeddings, images, rerank, speech,
+ *     transcription, a video or an inline batch submit, ...) is held at the
+ *     SDK's bound of the prepared call (Provider::endpoint_worst_case_cost,
+ *     sp::runtime::endpoint_worst_case_cost) over the same catalogue, which the
+ *     linked library must grant (sp::capability::EndpointCostBounds); each
+ *     reason the SDK gives for no bound refuses it with a P_MONEY_* code. A
+ *     call whose operation the policy states the provider does not bill (a
+ *     poll, a download, a file call, moderation) is not priced at all, as an
+ *     unpriced binding sends it. An OpenAI batch submit, whose requests are in
+ *     an uploaded file, is refused: the submit does not bound what it bills.
+ *     At a routing gateway an embeddings call is bounded only by the price cap
+ *     its extensions send (`provider.max_price.prompt`); the call is prepared
+ *     again with that cap lowered to the route ceiling, and refused when it
+ *     cannot carry it.
  *  2. Preflight. A call that cannot be bounded is refused before any request
  *     is sent, with a P_MONEY_* code; so is a call whose hold does not fit the
  *     remaining budget (P_MONEY_BUDGET).
@@ -44,7 +59,13 @@
  *     input_image (the assumption "input at input_image"). An unknown outcome, resent transport
  *     attempts, or partial or inconsistent usage keep the hold as the charge.
  *     A failure that proves the provider accepted nothing (no request was
- *     sent, or a completed HTTP 4xx answer declined it) releases it.
+ *     sent, or a completed HTTP 4xx answer declined it) releases it. An
+ *     endpoint call is settled at the provider's reported cost, else the
+ *     SDK's endpoint estimate (sp::runtime::endpoint_estimate) of its typed
+ *     result from the facts it was prepared with; a result the SDK has no
+ *     estimate of (a batch or video submit, whose lines or job come later), a
+ *     unit without a price or a count, and a result that may have billed more
+ *     than it counted keep the hold as the charge.
  *
  * Units. One microunit is 1e-6 USD. Catalogue amounts are exact nano-USD and
  * round up once to whole microunits, so for usage within the reserved bounds a
@@ -158,10 +179,11 @@ inline constexpr std::string_view kCatalogueScheme = "sp-model-catalogue/1";
  * What a typed request needs before it is priced. Everything that decides the
  * amount (service tier, priced extensions, fallback models, server tools and
  * their caps, routing, image input) is read by the SDK from the prepared
- * request (Provider::request_facts()).
+ * request (Provider::request_facts(), and Provider::endpoint_facts() for an
+ * endpoint call), so no typed request sets anything here.
  */
 struct MonetaryRequestFacts {
-    /// A call the hold does not price at all yet (a SchemaProvider endpoint call).
+    /// A call the hold does not price at all.
     std::optional<std::string> unpriced;
 };
 
@@ -203,8 +225,15 @@ struct MonetaryQuote {
     /// the tiers the request's priced extensions name.
     sp::RequestFacts                  request_facts;
     /// That tier (sp::pricing::billed_tier()); "" for the standard rates. Every record of the call keeps it
-    /// (ProgramMonetaryRecord::billed_tier).
+    /// (ProgramMonetaryRecord::billed_tier). For an endpoint call, the tier its facts price it under (the tier of the
+    /// requests it carries, for a batch submit).
     std::string                       billed_tier;
+    /// An endpoint call: the facts the SDK stated when it was prepared (Provider::endpoint_facts), which its bound
+    /// read and its settlement prices the result with. Empty for a chat call.
+    std::optional<sp::EndpointFacts>  endpoint_facts;
+    /// The endpoint request the call was prepared from, which types its outcome for the SDK's estimate
+    /// (EndpointPayload::estimate). Set by prepare_priced_call(); without it an endpoint call settles at its hold.
+    std::shared_ptr<const neograph::detail::EndpointPayload> endpoint_payload;
     /// The entry and price rows the hold was priced with (ProgramMonetaryRecord::pricing).
     json pricing = json::object();
 };
@@ -292,6 +321,11 @@ NEOGRAPH_PROGRAM_API ProgramMonetaryRecord unknown_outcome_record(
     const MonetaryQuote& quote, const MonetaryCallSite& site, std::string reason);
 
 NEOGRAPH_PROGRAM_API json encode_monetary_record(const ProgramMonetaryRecord& record);
+#if defined(NEOGRAPH_PROGRAM_TESTING)
+/** Testing only: the capability bits the endpoint pricing reads in place of the linked SchemaProvider library's
+ *  (sp::runtime::interface_contract()); empty reads the library's again. */
+NEOGRAPH_PROGRAM_API void set_linked_capabilities_for_testing(std::optional<std::uint64_t> capabilities);
+#endif
 NEOGRAPH_PROGRAM_API ProgramMonetaryRecord decode_monetary_record(const json& value);
 NEOGRAPH_PROGRAM_API void validate_monetary_record(const ProgramMonetaryRecord& record);
 

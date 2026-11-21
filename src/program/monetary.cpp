@@ -255,11 +255,23 @@ void bounded_text(const std::string& value, std::string_view field, bool may_be_
 }  // namespace
 
 MonetaryRequestFacts monetary_request_facts(const ProviderRequest& request) {
-    MonetaryRequestFacts facts;
-    // The hold prices chat calls only; an endpoint request is not held by its bound yet (SchemaProvider#124).
-    if (request.endpoint) facts.unpriced = "SchemaProvider endpoint calls";
-    return facts;
+    // The SDK reads what prices a call from the prepared request: a chat call's request facts, an endpoint call's
+    // endpoint facts (assess_monetary_call).
+    (void)request;
+    return {};
 }
+
+#if defined(NEOGRAPH_PROGRAM_TESTING)
+namespace {
+std::mutex                   linked_capabilities_mutex;
+std::optional<std::uint64_t> linked_capabilities_override;
+}  // namespace
+
+void set_linked_capabilities_for_testing(std::optional<std::uint64_t> capabilities) {
+    std::lock_guard lock(linked_capabilities_mutex);
+    linked_capabilities_override = capabilities;
+}
+#endif
 
 namespace {
 
@@ -331,6 +343,136 @@ void refuse(MonetaryQuote& quote, const sp::pricing::WorstCase& bound, const sp:
     block(quote, code, "the SDK gives the request no cost bound (" + joined(stated) + ")");
 }
 
+// The capability bits of the linked SchemaProvider library.
+std::uint64_t linked_capabilities() {
+#if defined(NEOGRAPH_PROGRAM_TESTING)
+    {
+        std::lock_guard lock(linked_capabilities_mutex);
+        if (linked_capabilities_override) return *linked_capabilities_override;
+    }
+#endif
+    return sp::runtime::interface_contract().capabilities;
+}
+
+// Refuses the endpoint call `quote` by the first of the SDK's reasons, as refuse() does for a chat call. The witness
+// keeps every reason as the SDK states it.
+void refuse_endpoint(MonetaryQuote& quote, const sp::pricing::EndpointBound& bound, const sp::EndpointFacts& facts) {
+    using sp::pricing::UnboundedBy;
+    quote.hold   = 0;
+    auto reasons = json::array();
+    std::vector<std::string> stated;
+    for (const auto& reason : bound.unbounded) {
+        const auto by = std::string(sp::pricing::to_string(reason.by));
+        reasons.push_back(json{{"by", by}, {"subject", reason.subject}, {"detail", reason.detail}});
+        stated.push_back(by + (reason.subject.empty() ? "" : " '" + reason.subject + "'") + ": " + reason.detail);
+    }
+    quote.witness["unbounded"] = std::move(reasons);
+    if (bound.unbounded.empty()) {
+        block(quote, "P_MONEY_NO_UPPER_BOUND", "the SDK gives the endpoint call no cost bound");
+        return;
+    }
+    const auto cause = std::find_if(bound.unbounded.begin(), bound.unbounded.end(),
+                                    [](const auto& item) { return item.by != UnboundedBy::Invocations; });
+    const auto& reason = cause != bound.unbounded.end() ? *cause : bound.unbounded.front();
+    // A price the catalogue lacks is the model's only when the reason names the model the call bills; an endpoint
+    // call's other prices are its units.
+    if (reason.by == UnboundedBy::ModelPrice && !facts.model.empty() && reason.subject == facts.model) {
+        const auto* entry = quote.catalogue->find(facts.family, facts.origin, facts.model).entry;
+        if (!entry || entry->pricing.empty()) {
+            block(quote, "P_MONEY_UNKNOWN_MODEL",
+                  "the model catalogue has no price for model '" + facts.model + "' at " + quote.origin);
+            return;
+        }
+    }
+    if (reason.by == UnboundedBy::Unmodeled || reason.by == UnboundedBy::Billing)
+        quote.witness["unmodeled"] = reason.subject;
+    block(quote, refusal_code(reason.by), "the SDK gives the endpoint call no cost bound (" + joined(stated) + ")");
+}
+
+// The facts of an endpoint call its record keeps beside the entry and rows (ProgramMonetaryRecord::pricing): the
+// policy fact and operation it reached and, for a call that bills its model, each line of its bound (the unit, the
+// price key that priced it, the quantity and its rate in nano-USD per million units). A call that bills the requests
+// it carries keeps how many it carries, since each of them is bounded on its own.
+json endpoint_pricing(const sp::EndpointFacts& facts, const sp::pricing::EndpointBound& bound) {
+    json value{{"endpoint", facts.endpoint}, {"operation", facts.operation}};
+    if (facts.billing == sp::descriptor::EndpointBilling::Carried) {
+        value["requests"] = static_cast<std::uint64_t>(facts.carried.size());
+        return value;
+    }
+    auto lines = json::array();
+    for (const auto& line : bound.lines)
+        lines.push_back(json{{"unit", line.unit}, {"row", line.row}, {"quantity", line.quantity}, {"rate", line.rate}});
+    value["lines"] = std::move(lines);
+    return value;
+}
+
+// Holds the endpoint call `quote` at the SDK's bound of the prepared call.
+void assess_endpoint_call(MonetaryQuote& quote, const PreparedProviderRequest& prepared) {
+    // A library built before the endpoint cost bounds answers every billed endpoint call without one, so the bound
+    // is read only from a library that grants them.
+    if ((linked_capabilities() & sp::capability::EndpointCostBounds) == 0) {
+        quote.witness["unmodeled"] = "endpoint cost bounds";
+        block(quote, "P_MONEY_UNMODELED",
+              "the linked SchemaProvider library does not bound endpoint calls (capability EndpointCostBounds)");
+        return;
+    }
+    const auto& facts    = Provider::endpoint_facts(prepared);
+    quote.endpoint_facts = facts;
+    quote.witness["endpoint"]  = facts.endpoint;
+    quote.witness["operation"] = facts.operation;
+    quote.billed_tier =
+        facts.billing == sp::descriptor::EndpointBilling::Carried ? facts.carried_tier : facts.service_tier;
+    if (!facts.input_file.empty()) {
+        // An OpenAI batch submit: its requests are lines of an uploaded file, which the submit does not carry.
+        quote.witness["unmodeled"] = "batch requests in an uploaded file";
+        block(quote, "P_MONEY_UNMODELED",
+              "the batch's requests are in an uploaded file, so the submit does not bound what the batch bills");
+        return;
+    }
+    const auto bound    = Provider::endpoint_worst_case_cost(prepared, *quote.catalogue);
+    quote.route_ceiling = bound.route_ceiling;
+    if (!bound.total || !bound.unbounded.empty()) {
+        refuse_endpoint(quote, bound, facts);
+        return;
+    }
+    if (bound.route_ceiling && !bound.pin) {
+        // A batch at a routing gateway is bounded at the route ceilings of its requests, which no request member
+        // makes the gateway keep to.
+        block(quote, "P_MONEY_NO_UPPER_BOUND",
+              "the endpoint call is bounded at a routing gateway's route ceilings, which the request cannot pin");
+        return;
+    }
+    quote.hold       = ceil_microunits(bound.total->nano_usd);
+    quote.hold_basis = bound.route_ceiling ? "route_ceiling" : "list_rates";
+    quote.pin        = bound.pin;
+    quote.pinned     = bound.pinned;
+    quote.pricing    = json::object();
+    if (!bound.entry.empty()) {
+        const auto* entry = quote.catalogue->entry(bound.entry);
+        if (!entry) entry = quote.catalogue->entry(bound.entry, true);
+        if (!entry) {
+            quote.hold = 0;
+            block(quote, "P_MONEY_NO_UPPER_BOUND",
+                  "the cost bound of the endpoint call names no catalogue entry to hold it by");
+            return;
+        }
+        quote.pricing["entry"] = entry->id;
+        quote.pricing["units"] = price_rows(*entry);
+        quote.witness["entry"] = entry->id;
+    }
+    if (!quote.billed_tier.empty()) quote.pricing["service_tier"] = quote.billed_tier;
+    quote.pricing["endpoint"] = endpoint_pricing(facts, bound);
+    // Whatever settles the call, its record keeps this pricing, which a record holds at most 16 KiB of.
+    if (neograph::detail::canonical_json_bytes(quote.pricing).size() > 16384) {
+        quote.hold = 0;
+        block(quote, "P_MONEY_UNMODELED", "the pricing of the endpoint call is larger than its record can keep");
+        return;
+    }
+    quote.witness["attempts"]            = bound.attempts;
+    quote.witness["reserved_microunits"] = quote.hold;
+    quote.witness["basis"]               = quote.hold_basis;
+}
+
 }  // namespace
 
 MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
@@ -357,6 +499,10 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
         quote.witness["unmodeled"] = *facts.unpriced;
         block(quote, "P_MONEY_UNMODELED",
               "the request uses " + *facts.unpriced + ", which the model catalogue cannot price");
+        return quote;
+    }
+    if (prepared.is_endpoint()) {
+        assess_endpoint_call(quote, prepared);
         return quote;
     }
     // The request's service tier as the policy maps it ("" for the standard rates). Settlement prices the usage under
@@ -445,8 +591,40 @@ MonetaryQuote sent_quote(const MonetaryRequestFacts& facts, const PreparedProvid
 
 }  // namespace
 
+namespace {
+
+// prepare_priced_call() for an endpoint call: prepared as it is, then, when its bound at a routing gateway reads a
+// price cap above the route ceiling, prepared again with the cap lowered to it, once. The quote is the bound of the
+// request that is sent. A call whose operation the policy states the provider does not bill is not priced.
+PricedPreparation prepare_priced_endpoint_call(Provider& provider, ProviderRequest request) {
+    const auto facts   = monetary_request_facts(request);
+    auto       payload = request.endpoint;
+    auto       pinnable = request;
+    auto       prepared = provider.prepare(std::move(request));
+    if (!prepared.valid()) return {std::move(prepared), std::nullopt};
+    auto quote = assess_monetary_call(facts, prepared);
+    if (quote.blocker.empty() && quote.pin && !quote.pinned) {
+        if (auto pinned = payload->with_max_price(*quote.pin)) {
+            payload           = std::move(pinned);
+            pinnable.endpoint = payload;
+            prepared          = PreparedProviderRequest{};  // release its operation slot first
+            prepared          = provider.prepare(std::move(pinnable));
+            if (!prepared.valid()) return {std::move(prepared), std::move(quote)};
+        }
+        quote = sent_quote(facts, prepared);
+    }
+    if (quote.blocker.empty() && quote.endpoint_facts &&
+        quote.endpoint_facts->billing == sp::descriptor::EndpointBilling::None)
+        return {std::move(prepared), std::nullopt};
+    quote.endpoint_payload = std::move(payload);
+    return {std::move(prepared), std::move(quote)};
+}
+
+}  // namespace
+
 PricedPreparation prepare_priced_call(Provider& provider, ProviderRequest request, bool priced) {
     if (!priced) return {provider.prepare(std::move(request)), std::nullopt};
+    if (request.endpoint) return prepare_priced_endpoint_call(provider, std::move(request));
     const auto facts = monetary_request_facts(request);
     std::optional<MonetaryQuote> probed_quote;
     {
@@ -535,6 +713,43 @@ std::optional<std::uint64_t> reported_cost_microunits(const sp::ProviderReported
 
 namespace {
 
+// The record of one dispatched endpoint call's completed outcome: the provider's reported cost, else the SDK's
+// estimate of its typed result from the facts it was prepared with, else its hold.
+ProgramMonetaryRecord settle_endpoint_amount(const MonetaryQuote& quote, const MonetaryCallSite& site,
+                                             const sp::Outcome& outcome, const sp::Completion& completion) {
+    if (const auto reported = reported_cost_microunits(completion.usage.provider_cost)) {
+        auto record       = base_record(quote, site);
+        record.evidence   = ProgramMonetaryEvidence::Reported;
+        record.microunits = *reported;
+        record.basis      = "provider_reported";
+        return record;
+    }
+    if (!quote.catalogue) return held_record(quote, site, "the hold names no catalogue");
+    if (!quote.endpoint_payload || !quote.endpoint_facts)
+        return held_record(quote, site, "the hold names no endpoint request to type the result by");
+    const auto estimate = quote.endpoint_payload->estimate(*quote.endpoint_facts, outcome, *quote.catalogue);
+    if (!estimate) return held_record(quote, site, "the SDK has no estimate of this endpoint call's result");
+    if (!estimate->total)
+        return held_record(quote, site, "the catalogue has no price for " + joined(estimate->unpriced));
+    if (estimate->lower_bound) return held_record(quote, site, "the provider may bill more than the result counted");
+    auto record       = base_record(quote, site);
+    record.evidence   = ProgramMonetaryEvidence::Estimated;
+    record.microunits = ceil_microunits(estimate->total->nano_usd);
+    record.basis      = quote.hold_basis;
+    // At a routing gateway the estimate takes the entry's listed rates, and the endpoint the gateway chose may bill
+    // more, up to the cap the request was held at.
+    record.may_undercount = quote.route_ceiling;
+    if (estimate->entry != quote.pricing.value("entry", std::string())) {
+        // The served model's entry priced the call.
+        const auto* entry = quote.catalogue->entry(estimate->entry);
+        if (!entry) entry = quote.catalogue->entry(estimate->entry, true);
+        record.pricing["entry"] = estimate->entry;
+        record.pricing["units"] = entry ? price_rows(*entry) : json::object();
+    }
+    if (!estimate->assumptions.empty()) record.pricing["assumptions"] = estimate->assumptions;
+    return record;
+}
+
 // The record of one dispatched call's outcome, without the serving upstream.
 std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       quote,
                                                    const MonetaryCallSite&    site,
@@ -547,6 +762,7 @@ std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       qu
     const auto& completion = std::get<sp::Completion>(*outcome);
     if (completion.attempt.prior_usage_unknown || completion.attempt.transport_internal_resends != 0)
         return held_record(quote, site, "the usage of resent transport attempts is unknown");
+    if (quote.endpoint_facts) return settle_endpoint_amount(quote, site, *outcome, completion);
     const auto& usage = completion.usage;
     if (usage.stage != sp::UsageStage::Final) return held_record(quote, site, "incomplete_usage");
     if (const auto reported = reported_cost_microunits(usage.provider_cost)) {
