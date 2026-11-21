@@ -3555,6 +3555,25 @@ TEST(ProgramProviderBindingJournal, AnUploadFromMemoryIsReplayedAfterAResume) {
     EXPECT_EQ(peer.received(), std::vector<std::string>{"bytes in memory"}) << "uploaded once";
 }
 
+TEST(ProgramProviderBindingJournal, APricedBindingSendsAnUnbilledEndpointCallWithoutAHold) {
+    // The policy states that the provider does not bill a file upload: a priced binding sends it as an unpriced one
+    // does, holds nothing for it and keeps no record of it.
+    TempDir                               files("endpoint-upload-priced");
+    neograph::test::endpoints::UploadPeer peer;
+    auto options     = endpoint_options(peer.origin());
+    options.priced   = true;
+    options.monetary = 100'000;
+    Host h(std::make_shared<Peer>(), options, &files);
+    h.script().upload_bytes = "bytes in memory";
+    const auto done = h.run(Shape::FileUpload, "upload-priced");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.received(), std::vector<std::string>{"bytes in memory"});
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+    EXPECT_TRUE(done.monetary_records().empty());
+    EXPECT_EQ(done.usage().monetary_microunits, 0U);
+    EXPECT_EQ(done.remaining_budget().monetary_microunits, options.monetary);
+}
+
 TEST(ProgramProviderBindingJournal, TheJournalAndCheckpointsHoldNoCredential) {
     // #531: an endpoint call's API key travels in its authorization header, never in what is stored.
     TempDir                    files("endpoint-secrets");
@@ -4532,6 +4551,37 @@ TEST(ProgramProviderBindingJournal, AChunkedUploadResumedBeforeItsFirstPartStart
     EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(4, "succeeded"));
     h.close();
     EXPECT_GE(files_holding_none_of(files.path, secrets_of(peer)), 3U);
+}
+
+TEST(ProgramProviderBindingJournal, APricedChunkedUploadResumedBeforeItsFirstPartStartsAgain) {
+    // The opening of an upload's session is not billed, so a priced binding holds nothing for it: resumed before its
+    // first part, the Program opens another session and sends the file whole, as an unpriced binding does.
+    TempDir           files("upload-restart-priced");
+    ChunkedUploadPeer peer;
+    auto              options = chunked_options(peer);
+    options.priced            = true;
+    options.monetary          = 100'000;
+    Host h(std::make_shared<Peer>(), options, &files);
+    h.script().upload_bytes          = pattern(100);
+    h.script().chunk_size            = 40;
+    h.script().interrupt_after_calls = 1;
+    const auto paused                = h.run(Shape::ChunkedUpload, "upload-restart-priced");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    EXPECT_EQ(peer.starts(), 1);
+
+    auto handle =
+        h.runtime().resume(kOwner, "upload-restart-priced", resume_after(paused, "trace-upload-restart-priced"));
+    const auto done = handle.wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.starts(), 2) << "the first session cannot be written to: its URL was never stored";
+    const auto held = peer.sessions();
+    ASSERT_EQ(held.size(), 2U);
+    EXPECT_EQ(held[1].bytes, pattern(100));
+    const auto notices = handle.notices();
+    EXPECT_NE(notice_with(notices, "P_PROVIDER_UPLOAD_RESTARTED"), nullptr);
+    EXPECT_TRUE(paused.monetary_records().empty());
+    EXPECT_TRUE(done.monetary_records().empty());
+    EXPECT_EQ(done.usage().monetary_microunits, 0U);
 }
 
 TEST(ProgramProviderBindingJournal, AChunkedUploadResumedAfterAPartIsRefusedBeforeAnythingIsSent) {
