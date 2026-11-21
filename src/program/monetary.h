@@ -24,7 +24,10 @@
  *     models, its server tools at their use caps, what it carries (an image)
  *     and, on an OpenRouter origin, the route ceiling, rounded up once to
  *     whole microunits. Every reason the SDK gives for no bound refuses the
- *     call with a P_MONEY_* code. On an
+ *     call with a P_MONEY_* code. So does a request that carries image input
+ *     (RequestFacts::image_input) priced at the listed rates of an entry
+ *     whose input_image rate, which the SDK's bound does not read, is above
+ *     every input rate the bound holds input at (P_MONEY_UNMODELED). On an
  *     OpenRouter origin the request is pinned before it is prepared to be
  *     sent: its provider.max_price becomes the route ceiling, or the host's
  *     own cap where that is lower, so the request that is digested, journaled
@@ -34,8 +37,10 @@
  *     remaining budget (P_MONEY_BUDGET).
  *  3. Settle exactly once from the outcome: the provider's reported cost when
  *     the response carries one, else the catalogue estimate
- *     (sp::pricing::estimate) from the snapshot the hold was priced with, plus
- *     the reserved server-tool fees. An unknown outcome, resent transport
+ *     (sp::pricing::estimate) from the snapshot the hold was priced with,
+ *     under the tier the hold was bounded at (the request facts' billed tier,
+ *     which the record keeps as billed_tier), plus the reserved server-tool
+ *     fees. An unknown outcome, resent transport
  *     attempts, or partial or inconsistent usage keep the hold as the charge.
  *     A failure that proves the provider accepted nothing (no request was
  *     sent, or a completed HTTP 4xx answer declined it) releases it.
@@ -192,6 +197,13 @@ struct MonetaryQuote {
     std::string                       service_tier;
     bool                              route_ceiling = false;
     std::uint64_t                     tool_fees_nano_usd = 0;
+    /// The facts of the request that is sent (Provider::request_facts()). Settlement prices the usage with them
+    /// (sp::pricing::estimate), so it bills under the tier the hold was bounded at: the service tier together with
+    /// the tiers the request's priced extensions name.
+    sp::RequestFacts                  request_facts;
+    /// That tier (sp::pricing::billed_tier()); "" for the standard rates. Every record of the call keeps it
+    /// (ProgramMonetaryRecord::billed_tier).
+    std::string                       billed_tier;
     /// The entry and price rows the hold was priced with (ProgramMonetaryRecord::pricing).
     json pricing = json::object();
 };

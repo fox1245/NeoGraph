@@ -10,6 +10,7 @@
 
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -169,6 +170,8 @@ ProgramMonetaryRecord base_record(const MonetaryQuote& quote, const MonetaryCall
     record.catalog_version     = quote.catalog_version;
     record.catalog_digest      = quote.catalog_digest;
     record.pricing             = quote.pricing;
+    // And the tier the call bills under, which settlement prices the usage at.
+    record.billed_tier         = quote.billed_tier;
     return record;
 }
 
@@ -328,6 +331,43 @@ void refuse(MonetaryQuote& quote, const sp::pricing::WorstCase& bound, const sp:
     block(quote, code, "the SDK gives the request no cost bound (" + joined(stated) + ")");
 }
 
+// The input rates the SDK's bound holds input at: the dearest of the input-side rates a ModelPrice carries.
+std::optional<std::uint64_t> bound_input_rate(const sp::pricing::ModelPrice& price) {
+    std::optional<std::uint64_t> dearest;
+    for (const auto& rate : {price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio})
+        if (rate && (!dearest || *rate > *dearest)) dearest = rate;
+    return dearest;
+}
+
+bool listed_member(std::string_view unit) {
+    return std::any_of(std::begin(sp::descriptor::listed_members), std::end(sp::descriptor::listed_members),
+                       [&](const sp::descriptor::ListedMember& member) { return member.member == unit; });
+}
+
+// A row of `entry` that bills input tokens in `tier` and the input band of `input_tokens` (sp::pricing::listed_floor),
+// that no ModelPrice the bound reads carries (input_image), and that is above every input rate the bound holds input
+// at, or at a price that is not a fixed amount: the image input of a request would be billed above its hold. Nothing
+// when there is none. The SDK's own functions read every row; the listing members a route ceiling covers are not rates
+// of the image a request carries and are left out.
+std::optional<json> unread_image_input_row(const sp::descriptor::CatalogueEntry& entry, std::string_view tier,
+                                           std::uint64_t input_tokens) {
+    const auto held_at = bound_input_rate(sp::pricing::dearest_price_of(entry, tier, input_tokens));
+    for (const auto& row : entry.pricing) {
+        if (listed_member(row.first)) continue;
+        auto alone    = entry;
+        alone.pricing = {row};
+        const auto listed = sp::pricing::listed_floor(alone, sp::pricing::TokenSide::Input, tier, input_tokens);
+        if (!listed.rate && !listed.unknown) continue;
+        if (bound_input_rate(sp::pricing::dearest_price_of(alone, tier, input_tokens))) continue;
+        if (listed.rate && held_at && *listed.rate <= *held_at) continue;
+        return json{{"entry", entry.id},
+                    {"unit", row.first},
+                    {"rate", row.second},
+                    {"input_rate", held_at ? json(sp::pricing::decimal_text(*held_at)) : json(nullptr)}};
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
@@ -361,6 +401,8 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
     const auto& request = Provider::request_facts(prepared);
     quote.service_tier  = std::string(policy.billing_tier(quote.family, request.service_tier));
     if (!quote.service_tier.empty()) quote.witness["service_tier"] = quote.service_tier;
+    // Settlement prices the usage with the same facts as the hold below, so under the same tier.
+    quote.request_facts = request;
 
     // The SDK's worst case of the prepared request over the catalogue the hold names: every model invocation and
     // transport attempt the request may bill, the tier it bills under (its priced extensions included), its fallback
@@ -376,6 +418,22 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
         block(quote, "P_MONEY_NO_UPPER_BOUND",
               "the cost bound of model '" + quote.model + "' names no catalogue entry or route ceiling pin to hold it by");
         return quote;
+    }
+    // A bound always has a billed tier: the SDK refuses a request whose extensions name none.
+    quote.billed_tier = sp::pricing::billed_tier(request, quote.service_tier).tier;
+    // The SDK's bound at the listed rates holds an image the request carries at its input rates, and never reads the
+    // entry's input_image rate: an entry that lists it above them would bill the image above the hold. At the route
+    // ceiling every input token is held at ceiling_input, which the SDK refuses below a listed input_image rate.
+    if (request.image_input && !bound.route_ceiling) {
+        if (auto row = unread_image_input_row(*entry, quote.billed_tier, bound.invocation_input_tokens)) {
+            quote.witness["unmodeled"]   = "image input";
+            quote.witness["image_input"] = *row;
+            block(quote, "P_MONEY_UNMODELED",
+                  "the request carries image input, which entry '" + entry->id + "' prices at " +
+                      row->at("unit").get<std::string>() + " " + row->at("rate").get<std::string>() +
+                      " USD per token, above every input rate the SDK's cost bound holds input at");
+            return quote;
+        }
     }
     quote.hold               = ceil_microunits(bound.total->nano_usd);
     quote.hold_basis         = bound.route_ceiling ? "route_ceiling" : "list_rates";
@@ -552,12 +610,13 @@ std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       qu
     if (!usage.input_total || !usage.output_total) return held_record(quote, site, "incomplete_usage");
     if (usage.quality != sp::UsageQuality::Consistent) return held_record(quote, site, "inconsistent_usage");
     if (!quote.catalogue) return held_record(quote, site, "the hold names no catalogue");
-    // The snapshot the hold was priced with, never a newer one. A response
-    // that names no model was answered by the admitted one.
+    // The snapshot the hold was priced with, never a newer one, and the facts of the request that was sent, so the
+    // tier its priced extensions bill under prices the usage as it bounded the hold. A response that names no model
+    // was answered by the admitted one.
     auto model = completion.model;
     if (model.requested.empty()) model.requested = quote.model;
     const auto estimate = sp::pricing::estimate(*quote.catalogue, quote.family, quote.origin, model, usage,
-                                                quote.service_tier, quote.route_ceiling);
+                                                quote.request_facts, quote.service_tier, quote.route_ceiling);
     if (!estimate.total)
         return held_record(quote, site, "the catalogue has no price for " + joined(estimate.unpriced));
     // Server tools are charged at their reserved cap: the usage does not count their uses.
@@ -621,6 +680,8 @@ json encode_monetary_record(const ProgramMonetaryRecord& record) {
     if (!record.pricing.empty()) value["pricing"] = record.pricing;
     // Likewise a record without a serving upstream keeps its exact bytes.
     if (record.served_by) value["served_by"] = *record.served_by;
+    // And a call billed at the standard rates, as every record before the tier was kept.
+    if (!record.billed_tier.empty()) value["billed_tier"] = record.billed_tier;
     return value;
 }
 
@@ -631,7 +692,7 @@ ProgramMonetaryRecord decode_monetary_record(const json& value) {
         value, "Program monetary record",
         {"call_id", "operation_id", "node", "origin", "model", "evidence", "microunits",
          "reserved_microunits", "basis", "catalog_version", "catalog_digest", "conservative",
-         "may_undercount", "replayed", "reason", "pricing", "served_by"});
+         "may_undercount", "replayed", "reason", "pricing", "served_by", "billed_tier"});
     ProgramMonetaryRecord record;
     record.call_id             = string_field(value, "call_id");
     record.operation_id        = string_field(value, "operation_id");
@@ -650,6 +711,12 @@ ProgramMonetaryRecord decode_monetary_record(const json& value) {
     record.reason              = string_field(value, "reason");
     if (value.contains("pricing")) record.pricing = value.at("pricing");
     if (value.contains("served_by")) record.served_by = string_field(value, "served_by");
+    // Written only when not empty: a stored empty tier is not a record this code writes.
+    if (value.contains("billed_tier")) {
+        record.billed_tier = string_field(value, "billed_tier");
+        if (record.billed_tier.empty())
+            throw std::invalid_argument("Program monetary record billed_tier is empty");
+    }
     validate_monetary_record(record);
     return record;
 }
@@ -663,6 +730,7 @@ void validate_monetary_record(const ProgramMonetaryRecord& record) {
     bounded_text(record.catalog_version, "catalog_version", true);
     bounded_text(record.catalog_digest, "catalog_digest", true);
     bounded_text(record.reason, "reason", true);
+    bounded_text(record.billed_tier, "billed_tier", true);
     if (!record.pricing.is_object() || neograph::detail::canonical_json_bytes(record.pricing).size() > 16384)
         throw std::invalid_argument("Program monetary record pricing must be an object of at most 16 KiB");
     if (record.served_by && !usable_served_by(*record.served_by))

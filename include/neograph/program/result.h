@@ -140,6 +140,16 @@ struct ProgramMonetaryRecord {
     /// fork, keeps the value it was stored with. Records written before it was
     /// added have none.
     std::optional<std::string> served_by;
+    /// The catalogue tier the call bills under, which an estimated amount is
+    /// priced at and the hold was bounded at: the request's service tier
+    /// together with the tiers its priced extensions name (Messages' `speed:
+    /// fast` bills under `fast`), as sp::pricing::billed_tier gives it. Empty
+    /// for the standard rates, and empty in a record written before it was
+    /// kept; such a record was priced at the tier `pricing` names as
+    /// `service_tier` (the standard rates when it names none), and it is
+    /// restored and charged as it was stored. It is in the encoded record
+    /// only when not empty, so a record at the standard rates keeps its bytes.
+    std::string                billed_tier;
 
     bool operator==(const ProgramMonetaryRecord&) const = default;
 };

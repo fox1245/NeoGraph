@@ -1564,7 +1564,9 @@ void init_program(py::module_& m) {
         "applied to the reported tokens; catalog_version and catalog_digest name it, pricing holds "
         "the entry and price rows) or 'held' (outcome or usage unknown, so the reservation is "
         "charged; reason says why). served_by is the upstream a routing gateway named as having "
-        "served the call (OpenRouter's provider), or None when the response named none.")
+        "served the call (OpenRouter's provider), or None when the response named none. billed_tier "
+        "is the catalogue tier the call bills under and was priced at (Messages' speed fast bills "
+        "under 'fast'), empty for the standard rates and in records written before it was kept.")
         .def_readonly("call_id", &ProgramMonetaryRecord::call_id)
         .def_readonly("operation_id", &ProgramMonetaryRecord::operation_id)
         .def_readonly("node", &ProgramMonetaryRecord::node)
@@ -1586,6 +1588,7 @@ void init_program(py::module_& m) {
             return json_to_py(value.pricing);
         })
         .def_readonly("served_by", &ProgramMonetaryRecord::served_by)
+        .def_readonly("billed_tier", &ProgramMonetaryRecord::billed_tier)
         .def("__repr__", [](const ProgramMonetaryRecord& value) {
             return "<ProgramMonetaryRecord " + value.model + " " +
                    std::string(to_string(value.evidence)) + " " +
