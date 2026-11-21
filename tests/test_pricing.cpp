@@ -446,9 +446,9 @@ TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
     EXPECT_EQ(fallback.pricing.at("entry"), "vendor/dearer");
 }
 
-TEST(PricingAssess, OnlyAnEndpointCallIsLeftUnpricedBeforeItIsPrepared) {
-    // What decides a chat call's price is read by the SDK from the prepared request; before it is prepared only an
-    // endpoint call is set apart.
+TEST(PricingWorstCase, NoTypedRequestIsLeftUnpricedBeforeItIsPrepared) {
+    // What decides a call's price is read by the SDK from the prepared request, an endpoint call's from the facts
+    // the SDK states for it (Provider::endpoint_facts): nothing is set apart before it is prepared.
     ProviderRequest chat;
     sp::chat::Request chat_payload;
     chat_payload.models       = {"vendor/a", "vendor/b"};
@@ -459,9 +459,54 @@ TEST(PricingAssess, OnlyAnEndpointCallIsLeftUnpricedBeforeItIsPrepared) {
     sp::embeddings::Request embed;
     embed.model = "embed";
     embed.inputs.push_back({"hello"});
-    const auto endpoint = program::detail::monetary_request_facts(make_endpoint_request(std::move(embed)));
-    ASSERT_TRUE(endpoint.unpriced);
-    EXPECT_EQ(*endpoint.unpriced, "SchemaProvider endpoint calls");
+    EXPECT_FALSE(program::detail::monetary_request_facts(make_endpoint_request(std::move(embed))).unpriced);
+}
+
+TEST(PricingWorstCase, AnOpenAIFileBatchIsRefusedBecauseItsRequestsAreInAnUploadedFile) {
+    // An OpenAI batch submit names the uploaded file its requests are in, so nothing in the request bounds what the
+    // batch bills: it is refused before it is sent, with that reason, and holds nothing.
+    auto           provider = provider_at("openai.chat", "https://api.openai.com", {});
+    sp::batches::Submit submit;
+    submit.input_file = "file-batch-input";
+    submit.endpoint   = "/v1/chat/completions";
+    auto       request  = make_endpoint_request(std::move(submit));
+    const auto facts    = program::detail::monetary_request_facts(request);
+    const auto prepared = provider->prepare(std::move(request));
+    ASSERT_TRUE(prepared.valid()) << (prepared.error() ? prepared.error()->safe_message : std::string());
+    ASSERT_TRUE(prepared.is_endpoint());
+    const auto quote = program::detail::assess_monetary_call(facts, prepared);
+    EXPECT_EQ(quote.blocker, "P_MONEY_UNMODELED");
+    EXPECT_EQ(quote.hold, 0U);
+    EXPECT_EQ(quote.witness.value("unmodeled", std::string()), "batch requests in an uploaded file")
+        << quote.witness.dump();
+    EXPECT_NE(quote.blocker_message.find("uploaded file"), std::string::npos) << quote.blocker_message;
+}
+
+TEST(PricingWorstCase, AnInlineBatchIsHeldAtTheBoundOfTheRequestsItCarries) {
+    // An Anthropic batch carries its requests inline: the hold is the SDK's bound of each request under the batch tier
+    // the policy states for its submit, summed, for one attempt (the provider charges a submit once it accepts it).
+    neograph::test::FixtureModel batched{"anthropic.messages", "batched", 1'000};
+    // Standard rows, and the batch tier's at half of them: 500 and 1,000 nano-USD per input and output token.
+    batched.pricing = json{{"input", "0.000001"}, {"output", "0.000002"},
+                           {"input/batch", "0.0000005"}, {"output/batch", "0.000001"}};
+    auto provider = provider_at("anthropic.messages", std::string(kMessagesOrigin), {batched});
+    auto item_request = make_provider_request(*provider, "batched", {neograph::test::message("q", sp::Role::User)});
+    auto& payload      = std::get<sp::messages::Request>(item_request.payload);
+    payload.max_tokens = 100;
+    sp::batches::Submit submit;
+    submit.items.push_back(sp::batches::Item{"item-1", payload});
+    auto       request  = make_endpoint_request(std::move(submit));
+    const auto facts    = program::detail::monetary_request_facts(request);
+    const auto prepared = provider->prepare(std::move(request));
+    ASSERT_TRUE(prepared.valid()) << (prepared.error() ? prepared.error()->safe_message : std::string());
+    const auto quote = program::detail::assess_monetary_call(facts, prepared);
+    ASSERT_TRUE(quote.blocker.empty()) << quote.blocker << ": " << quote.blocker_message;
+    // 1,000 input tokens at 500 and 100 output tokens at 1,000 nano-USD.
+    EXPECT_EQ(quote.hold, 500U + 100U);
+    ASSERT_TRUE(quote.catalogue);
+    const auto bound = Provider::endpoint_worst_case_cost(prepared, *quote.catalogue);
+    ASSERT_TRUE(bound.total);
+    EXPECT_EQ(quote.hold, microunits(*bound.total)) << "the hold is the SDK's endpoint bound";
 }
 
 TEST(PricingAssess, AMessagesClientToolBillsOnlyTokens) {

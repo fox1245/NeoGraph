@@ -2,6 +2,7 @@
 // A SchemaProvider whose endpoint calls reach a loopback peer: the built-in policy, with every list that names a
 // provider origin also naming the peer's.
 
+#include "model_catalogue.h"
 #include "typed_wire_peer.h"
 #include <algorithm>
 #include <atomic>
@@ -27,10 +28,13 @@ inline void admit_origin(json& node, const std::string& provider, const std::str
     if (lists_provider) node.push_back(json(origin));
 }
 
+// `models` are layered over the embedded catalogue (model_catalogue.h); none keeps the embedded catalogue alone.
 inline sp::descriptor::PolicySnapshot policy_at(const std::string& origin,
-                                                const std::vector<std::string>& providers = {"https://api.openai.com"}) {
+                                                const std::vector<std::string>& providers = {"https://api.openai.com"},
+                                                const std::vector<FixtureModel>& models = {}) {
     auto document = json::parse(sp::config_defaults::descriptor_policy_json);
     for (const auto& provider : providers) admit_origin(document, provider, origin);
+    if (!models.empty()) return policy_with_models(document, models);
     const auto policy = document.dump();
     auto admitted = sp::descriptor::load_policy(policy, sp::config_defaults::codec_defaults_json);
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
@@ -40,13 +44,14 @@ inline sp::descriptor::PolicySnapshot policy_at(const std::string& origin,
 
 inline std::shared_ptr<llm::SchemaProvider> provider_at(
     const std::string& origin, bool admitted = true,
-    const std::vector<std::string>& providers = {"https://api.openai.com"}) {
+    const std::vector<std::string>& providers = {"https://api.openai.com"},
+    const std::vector<FixtureModel>& models = {}) {
     sp::runtime::Options options;
     options.api_key = "fixture-key";
     options.default_timeout = 5s;
     options.retry_tokens = 0;
     options.retry_tokens_per_second = 0;
-    auto policy = admitted ? policy_at(origin, providers) : sp::descriptor::builtin_policy();
+    auto policy = admitted ? policy_at(origin, providers, models) : sp::descriptor::builtin_policy();
     return std::make_shared<llm::SchemaProvider>(test::descriptor("openai.chat", origin, std::move(policy)),
                                                  std::move(options));
 }

@@ -560,6 +560,8 @@ enum class Shape {
     EmbedBesideCheck,
     // #531: an endpoint node alone.
     Embed,
+    // An endpoint node, then the host node.
+    EmbedThenAfter,
     // #531: a video job submitted, then collected.
     VideoJob,
     // #541: a file uploaded by a host node.
@@ -577,6 +579,8 @@ struct HostOptions {
     std::optional<std::string>   service_tier;
     // The Chat Completions extension members the llm_call node sends.
     std::optional<json>          chat_extensions;
+    // The extension members the embed node sends.
+    std::optional<json>          embed_extensions;
     std::uint64_t monetary     = 1'000'000;  // run budget in micro-USD; 0 grants nothing
     std::uint64_t model_tokens = 1'000'000;
     std::uint64_t wall_time_ms = 10'000;
@@ -820,14 +824,20 @@ public:
                     {edge("__start__", "fan"), edge("fan", "__end__"), edge("work", "__end__")});
                 break;
             case Shape::EmbedBesideCheck:
+            case Shape::EmbedThenAfter:
             case Shape::Embed: {
                 definition["channels"]["text"] = {{"reducer", "overwrite"}, {"initial", "a cup of tea"}};
                 definition["channels"]["embeddings"] = {{"reducer", "overwrite"}, {"initial", json::array()}};
-                const json embed = {{"type", "embed"}, {"model", "fixture-embed"}, {"input", "text"},
-                                    {"output", "embeddings"}};
+                json embed = {{"type", "embed"}, {"model", "fixture-embed"}, {"input", "text"},
+                              {"output", "embeddings"}};
+                if (options_.embed_extensions) embed["extensions"] = *options_.embed_extensions;
                 if (shape == Shape::Embed) {
                     definition["nodes"] = {{"embed", embed}};
                     definition["edges"] = json::array({edge("__start__", "embed"), edge("embed", "__end__")});
+                } else if (shape == Shape::EmbedThenAfter) {
+                    definition["nodes"] = {{"embed", embed}, {"after", {{"type", "after"}}}};
+                    definition["edges"] = json::array(
+                        {edge("__start__", "embed"), edge("embed", "after"), edge("after", "__end__")});
                 } else {
                     definition["nodes"] = {{"embed", embed}, {"check", {{"type", "check"}}}};
                     definition["edges"] = json::array({edge("__start__", "embed"), edge("__start__", "check"),
@@ -3167,11 +3177,13 @@ TEST(ProgramProviderBindingJournal, APlanQuorumResumeNeverResendsOrRechargesAFin
 namespace {
 // #531: a host whose provider is a real SDK client at a loopback peer that admits the endpoint facts of
 // `providers`' origins.
+// `models` are the host's catalogue layer.
 HostOptions endpoint_options(const std::string& origin,
-                             std::vector<std::string> providers = {"https://api.openai.com"}) {
+                             std::vector<std::string> providers = {"https://api.openai.com"},
+                             std::vector<neograph::test::FixtureModel> models = {}) {
     HostOptions options;
-    options.provider = [origin, providers] {
-        return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(origin, true, providers));
+    options.provider = [origin, providers, models] {
+        return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(origin, true, providers, models));
     };
     options.model_tokens = 0;
     options.monetary     = 0;
@@ -3222,17 +3234,195 @@ TEST(ProgramProviderBindingJournal, AnEndpointCallIsJournaledAndAForkReplaysIt) 
     EXPECT_NE(forked.output().dump().find("-0.5"), std::string::npos) << "the fork keeps the replayed vectors";
 }
 
-TEST(ProgramProviderBindingJournal, APricedBindingRefusesAnEndpointCallBeforeItIsSent) {
-    // #531: the model catalogue cannot bound an endpoint call yet (SchemaProvider#124).
-    TempDir                    files("endpoint-priced");
+namespace {
+// The embedding model the embed shapes call, as the host's catalogue layer prices it at the peer's origin only. Its input
+// limit counts per input (an embedding model's does).
+constexpr std::uint64_t kEmbedInputLimit = 8'192;
+// 0.02 USD per million input tokens, 20 nano-USD per token; a route ceiling of 0.44 USD per million, 440 per token.
+constexpr std::string_view kEmbedInputRate   = "0.00000002";
+constexpr std::uint64_t    kEmbedInputNano   = 20;
+constexpr std::string_view kEmbedCeilingRate = "0.00000044";
+constexpr std::uint64_t    kEmbedCeilingNano = 440;
+// The input tokens embedding_body() reports.
+constexpr std::uint64_t kEmbedPromptTokens = 3;
+
+neograph::test::FixtureModel embed_model(const std::string& origin, json pricing,
+                                         std::optional<std::uint64_t> input_limit = kEmbedInputLimit) {
+    neograph::test::FixtureModel fixture{"openai.chat", "fixture-embed", input_limit};
+    fixture.pricing = std::move(pricing);
+    fixture.origins = {origin};
+    return fixture;
+}
+
+// A priced binding whose provider is a real SDK client at the peer, with `models` as the host's catalogue layer.
+HostOptions priced_endpoint_options(const std::string& origin, std::vector<neograph::test::FixtureModel> models,
+                                    std::vector<std::string> providers = {"https://api.openai.com"}) {
+    auto options     = endpoint_options(origin, std::move(providers), std::move(models));
+    options.priced   = true;
+    options.monetary = 100'000;
+    return options;
+}
+
+// nano-USD as the whole microunits a charge rounds up to.
+std::uint64_t charged_microunits(std::uint64_t nano_usd) { return (nano_usd + 999) / 1000; }
+}  // namespace
+
+TEST(ProgramProviderBindingJournal, APricedEmbeddingCallIsHeldAtTheSdkBoundAndSettledAtTheCatalogueEstimate) {
+    // The hold is the SDK's bound of the endpoint call: its one input at the model's input limit, at the entry's input
+    // rate, for one attempt, since the provider charges an embedding once it accepts it. The call is settled at the
+    // SDK's estimate of the usage the reply reports, at the same rate, which is never above the hold.
+    const auto hold    = charged_microunits(kEmbedInputLimit * kEmbedInputNano);
+    const auto settled = charged_microunits(kEmbedPromptTokens * kEmbedInputNano);
+    ASSERT_LT(settled, hold);
+    for (const bool durable : {true, false}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in process");
+        TempDir                    files("endpoint-priced");
+        neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+        const auto options = priced_endpoint_options(
+            peer.origin(), {embed_model(peer.origin(), json{{"input", std::string(kEmbedInputRate)}})});
+        Host       h(std::make_shared<Peer>(), options, durable ? &files : nullptr);
+        const auto result = h.run(Shape::Embed, "endpoint-priced");
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        EXPECT_EQ(peer.state->entered, 1U);
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        const auto& record = result.monetary_records().front();
+        EXPECT_EQ(record.reserved_microunits, hold) << "held at the SDK's endpoint bound";
+        EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+        EXPECT_EQ(record.microunits, settled) << "settled at the SDK's endpoint estimate";
+        EXPECT_LE(record.microunits, record.reserved_microunits);
+        EXPECT_EQ(record.basis, "list_rates");
+        EXPECT_EQ(record.model, "fixture-embed");
+        EXPECT_EQ(record.pricing.value("entry", std::string()), "fixture-embed");
+        EXPECT_EQ(result.usage().monetary_microunits, settled);
+        EXPECT_EQ(result.remaining_budget().monetary_microunits, options.monetary - settled);
+        if (durable) {
+            const auto stored = journal_monetary_records(files.provider_db());
+            ASSERT_EQ(stored.size(), 1U);
+            EXPECT_EQ(stored.front(), record) << "the journal keeps the record the run was charged";
+        }
+    }
+}
+
+TEST(ProgramProviderBindingJournal, AnEndpointCallWithoutACostBoundIsRefusedBeforeItIsSentWithItsMoneyCode) {
+    // The SDK's reason for no bound decides the code: a model the catalogue does not price, and a priced model with no
+    // input limit to bound the input by. A refused call holds nothing and charges nothing.
+    struct Case {
+        const char*                               name;
+        std::function<std::vector<neograph::test::FixtureModel>(const std::string&)> models;
+        const char*                               code;
+    };
+    const std::vector<Case> cases{
+        {"no entry", [](const std::string&) { return std::vector<neograph::test::FixtureModel>{}; },
+         "P_MONEY_UNKNOWN_MODEL"},
+        {"no input limit",
+         [](const std::string& origin) {
+             return std::vector<neograph::test::FixtureModel>{
+                 embed_model(origin, json{{"input", std::string(kEmbedInputRate)}}, std::nullopt)};
+         },
+         "P_MONEY_NO_INPUT_BOUND"},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        TempDir                    files("endpoint-refused");
+        neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+        const auto options = priced_endpoint_options(peer.origin(), item.models(peer.origin()));
+        Host       h(std::make_shared<Peer>(), options, &files);
+        const auto result = h.run(Shape::Embed, "endpoint-refused");
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+        EXPECT_NE(failure_text(result).find(item.code), std::string::npos) << failure_text(result);
+        EXPECT_EQ(peer.state->entered, 0U);
+        EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
+        EXPECT_TRUE(result.monetary_records().empty());
+        EXPECT_EQ(result.usage().monetary_microunits, 0U);
+    }
+}
+
+TEST(ProgramProviderBindingJournal, ARecoveredRunChargesItsJournaledEmbeddingCallAsStored) {
+    // The run dies after its embedding call is journaled. Recovery does not send the call again: it charges the record
+    // the call was settled with, as the journal stored it.
+    ScopedSimulatedClock       clock;
+    TempDir                    files("embed-takeover");
+    TempDir                    image("embed-takeover-image");
     neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
-    auto                       options = endpoint_options(peer.origin());
-    options.priced                     = true;
-    options.monetary                   = 100'000;
+    auto options = priced_endpoint_options(
+        peer.origin(), {embed_model(peer.origin(), json{{"input", std::string(kEmbedInputRate)}})});
+    options.wall_time_ms = 60'000;
+    {
+        Host h(std::make_shared<Peer>(), options, &files);
+        bool taken = false;
+        h.script().after = [&](const std::string&) {
+            if (taken) return;
+            taken = true;
+            crash_image(files.path, image.path);
+        };
+        const auto done = h.run(Shape::EmbedThenAfter, "embed-lease-run");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        ASSERT_TRUE(taken);
+    }
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
+    const auto stored = journal_monetary_records(image.provider_db());
+    ASSERT_EQ(stored.size(), 1U);
+    const auto settled = charged_microunits(kEmbedPromptTokens * kEmbedInputNano);
+    EXPECT_EQ(stored.front().microunits, settled);
+    clock.clock.advance(std::chrono::milliseconds(1'000));
+    Host       restarted(std::make_shared<Peer>(), options, &image);
+    const auto result = restarted.runtime().reconnect(kOwner, "embed-lease-run").wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(peer.state->entered, 1U) << "the journaled call is not sent again";
+    ASSERT_EQ(result.monetary_records().size(), 1U) << "charged once";
+    const auto& record = result.monetary_records().front();
+    EXPECT_TRUE(record.replayed);
+    auto unreplayed     = record;
+    unreplayed.replayed = false;
+    EXPECT_EQ(unreplayed, stored.front()) << "the restored record is the stored one but for the mark";
+    EXPECT_EQ(result.usage().monetary_microunits, settled);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, options.monetary - settled);
+}
+
+TEST(ProgramProviderBindingJournal, AGatewayEmbeddingIsSentWithItsPriceCapLoweredToTheRouteCeiling) {
+    // At a routing gateway the SDK bounds an embedding call only by the price cap the request sends: the lower of that
+    // cap and the entry's route ceiling. The request is sent with its cap lowered to the ceiling, the hold is the input
+    // limit at the ceiling, and the call settles at the listed rate.
+    TempDir                    files("embed-gateway");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    auto options = priced_endpoint_options(
+        peer.origin(),
+        {embed_model(peer.origin(), json{{"input", std::string(kEmbedInputRate)},
+                                         {"ceiling_input", std::string(kEmbedCeilingRate)}})},
+        {"https://openrouter.ai"});
+    // 1 USD per million input tokens, above the ceiling.
+    options.embed_extensions = json{{"provider", {{"max_price", {{"prompt", 1}}}}}};
     Host       h(std::make_shared<Peer>(), options, &files);
-    const auto result = h.run(Shape::Embed, "endpoint-priced");
+    const auto result = h.run(Shape::Embed, "embed-gateway");
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(peer.state->entered, 1U);
+    const auto sent = peer.state->requests.front();
+    ASSERT_TRUE(sent.contains("provider") && sent["provider"].contains("max_price")) << sent.dump();
+    // The ceiling in USD per million tokens, as OpenRouter reads max_price.
+    EXPECT_DOUBLE_EQ(sent["provider"]["max_price"]["prompt"].get<double>(),
+                     static_cast<double>(kEmbedCeilingNano) / 1'000.0)
+        << sent.dump();
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.reserved_microunits, charged_microunits(kEmbedInputLimit * kEmbedCeilingNano));
+    EXPECT_EQ(record.basis, "route_ceiling");
+    EXPECT_EQ(record.microunits, charged_microunits(kEmbedPromptTokens * kEmbedInputNano));
+    EXPECT_LE(record.microunits, record.reserved_microunits);
+}
+
+TEST(ProgramProviderBindingJournal, AGatewayEmbeddingWithoutAPriceCapIsRefusedBeforeItIsSent) {
+    // Without a cap in the request no route ceiling or pin covers the gateway's prices: no bound.
+    TempDir                    files("embed-gateway-uncapped");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    const auto options = priced_endpoint_options(
+        peer.origin(),
+        {embed_model(peer.origin(), json{{"input", std::string(kEmbedInputRate)},
+                                         {"ceiling_input", std::string(kEmbedCeilingRate)}})},
+        {"https://openrouter.ai"});
+    Host       h(std::make_shared<Peer>(), options, &files);
+    const auto result = h.run(Shape::Embed, "embed-gateway-uncapped");
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
-    EXPECT_NE(failure_text(result).find("P_MONEY_UNMODELED"), std::string::npos) << failure_text(result);
+    EXPECT_NE(failure_text(result).find("P_MONEY_NO_UPPER_BOUND"), std::string::npos) << failure_text(result);
     EXPECT_EQ(peer.state->entered, 0U);
     EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
 }
