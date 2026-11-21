@@ -776,8 +776,9 @@ private:
         auto prepared = std::move(priced.prepared);
         if (!prepared.valid()) co_return program::detail::preparation_failure_outcome(prepared);
         // An endpoint read (a job poll or download) is never charged and is safe to send again, so it is sent each
-        // time rather than journaled: a resumed poll must see the job as it is now, not replay what it was. A
-        // priced binding still refuses it below, as it refuses every endpoint call it cannot price.
+        // time rather than journaled: a resumed poll must see the job as it is now, not replay what it was. A priced
+        // binding does not price a call whose operation the policy states the provider does not bill, which every
+        // read's is, so it has no quote either; a read the policy bills is held, journaled and settled.
         if (prepared.is_endpoint_read() && !priced.quote) co_return co_await provider->dispatch_async(std::move(prepared));
         const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
         const auto id = dispatch_id(context, identity);
@@ -842,9 +843,11 @@ private:
                 // session was opened to be written into, so when no call of the node after the opening is
                 // journaled nothing was written, and opening a session charges nothing: the call is sent again,
                 // and the row stays as it was, with the restart recorded beside it. A later call may have written into the session, and its position
-                // is bound to that session, so the upload has to be sent again from the start. A priced or
-                // token-budgeted binding refuses every endpoint call before it is journaled, so no such row exists
-                // under one today; the conditions keep an upload that is priced one day from skipping its claim.
+                // is bound to that session, so the upload has to be sent again from the start. A priced binding does
+                // not price the opening of a session, whose operation the policy states the provider does not bill,
+                // so it holds nothing for it and takes this path too; a token-budgeted binding refuses every endpoint
+                // call before it is journaled. The conditions keep an upload that is priced or budgeted from skipping
+                // its hold or its claim.
                 if (admitted.opens_upload && !hold.active() && identity.model_token_budget == 0 &&
                     (!answered || !existing->withheld.empty())) {
                     if (auto later = later_call(impl->db, owner, admitted.scope, identity))

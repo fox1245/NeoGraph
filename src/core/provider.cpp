@@ -801,6 +801,28 @@ detail::EndpointPreparation detail::prepare_endpoint_call(
     sp::runtime::Client& client, sp::runtime::RunOptions options, const sp::files::Part& request) {
     return prepare_upload(client, std::move(options), request, json::object());
 }
+std::shared_ptr<const sp::json::Document> detail::with_route_max_price(
+    const std::shared_ptr<const sp::json::Document>& extensions, const sp::OpenRouterMaxPrice& price) {
+    json members = extensions && extensions->root().valid() ? json::parse(extensions->root().dump()) : json::object();
+    if (!members.is_object()) throw std::invalid_argument("Provider extensions must be a JSON object");
+    if (!members.contains("provider") || !members.at("provider").is_object()) members["provider"] = json::object();
+    // The members of OpenRouter's max_price, as the SDK reads them (sp::endpoints::max_price).
+    constexpr std::pair<const char*, std::optional<std::uint64_t> sp::OpenRouterMaxPrice::*> amounts[]{
+        {"prompt", &sp::OpenRouterMaxPrice::prompt_nano_usd}, {"completion", &sp::OpenRouterMaxPrice::completion_nano_usd},
+        {"image", &sp::OpenRouterMaxPrice::image_nano_usd}, {"audio", &sp::OpenRouterMaxPrice::audio_nano_usd},
+        {"request", &sp::OpenRouterMaxPrice::request_nano_usd}};
+    constexpr double nano_per_usd = 1e9;
+    json cap = json::object();
+    for (const auto& [name, member] : amounts)
+        if (const auto& amount = price.*member) cap[name] = static_cast<double>(*amount) / nano_per_usd;
+    auto provider = members.at("provider");
+    provider["max_price"] = std::move(cap);
+    members["provider"] = std::move(provider);
+    auto parsed = sp::json::parse(members.dump());
+    auto* document = std::get_if<sp::json::Document>(&parsed);
+    if (!document) throw std::invalid_argument("Provider extensions with a price cap do not parse");
+    return std::make_shared<const sp::json::Document>(std::move(*document));
+}
 // Normalize only portable client results; native replay and mixed messages are
 // indivisible, and a system message remains a boundary even when lifted out.
 static void group_tool_results(std::vector<sp::Message>& messages) {

@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace neograph::graph {
 class CancelToken;
@@ -200,6 +201,21 @@ public:
     /// Whether the call opens a chunked upload's session (`files::Start`, #541). The provider may answer with a
     /// value that only the live call holds, so a journal that cannot replay it sends the call again.
     virtual bool opens_upload_session() const noexcept { return false; }
+    /// The SDK's catalogue estimate of what the call billed (sp::runtime::endpoint_estimate), from the facts the call
+    /// was prepared with (Provider::endpoint_facts) and its outcome typed as the request type's result. Empty for a
+    /// request type the SDK has no estimate of (files, batches, ...) and for an outcome that is not such a result.
+    virtual std::optional<sp::pricing::EndpointEstimate> estimate(const sp::EndpointFacts& facts,
+                                                                  const sp::Outcome& outcome,
+                                                                  const sp::descriptor::ModelCatalogue& catalogue) const {
+        (void)facts; (void)outcome; (void)catalogue;
+        return std::nullopt;
+    }
+    /// The same request with OpenRouter's `provider.max_price` in its extensions replaced by `price`, for a request type
+    /// whose facts state that cap (embeddings); null for every other type.
+    virtual std::shared_ptr<const EndpointPayload> with_max_price(const sp::OpenRouterMaxPrice& price) const {
+        (void)price;
+        return nullptr;
+    }
 };
 } // namespace detail
 
@@ -376,6 +392,10 @@ NEOGRAPH_API EndpointPreparation prepare_endpoint_call(sp::runtime::Client& clie
                                                        const sp::files::Upload& request);
 NEOGRAPH_API EndpointPreparation prepare_endpoint_call(sp::runtime::Client& client, sp::runtime::RunOptions options,
                                                        const sp::files::Part& request);
+/// `extensions` with OpenRouter's `provider.max_price` replaced by `price`: each amount it sets, in nano-USD per million
+/// tokens, as the JSON number of USD per million tokens nearest to it; the other members are kept as they are.
+NEOGRAPH_API std::shared_ptr<const sp::json::Document> with_route_max_price(
+    const std::shared_ptr<const sp::json::Document>& extensions, const sp::OpenRouterMaxPrice& price);
 template <EndpointRequest Request>
 class TypedEndpointPayload final : public EndpointPayload {
 public:
@@ -384,6 +404,29 @@ public:
         return prepare_endpoint_call(client, std::move(options), request_);
     }
     bool opens_upload_session() const noexcept override { return std::is_same_v<Request, sp::files::Start>; }
+    std::optional<sp::pricing::EndpointEstimate> estimate(const sp::EndpointFacts& facts, const sp::Outcome& outcome,
+                                                          const sp::descriptor::ModelCatalogue& catalogue) const override {
+        using Outcome = EndpointOutcomeOf<Request>;
+        using Result  = std::variant_alternative_t<0, Outcome>;
+        if constexpr (requires(const sp::EndpointFacts& f, const Result& r, const sp::descriptor::ModelCatalogue& c) {
+                          sp::runtime::endpoint_estimate(f, r, c);
+                      }) {
+            const auto typed = sp::runtime::detail::typed_outcome(outcome, static_cast<const Outcome*>(nullptr));
+            if (const auto* result = std::get_if<Result>(&typed))
+                return sp::runtime::endpoint_estimate(facts, *result, catalogue);
+        }
+        return std::nullopt;
+    }
+    std::shared_ptr<const EndpointPayload> with_max_price(const sp::OpenRouterMaxPrice& price) const override {
+        if constexpr (std::is_same_v<Request, sp::embeddings::Request>) {
+            auto request       = request_;
+            request.extensions = with_route_max_price(request_.extensions, price);
+            return std::make_shared<const TypedEndpointPayload>(std::move(request));
+        } else {
+            (void)price;
+            return nullptr;
+        }
+    }
 private:
     Request request_;
 };

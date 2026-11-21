@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=82e247c60757fe9517f39c9e8d5b5ebdd1db3e0f3bcbf90bb1a0fbb1f51a21d7 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=444cae3c814f22d6e725bdcface327a07a6450ea6f49a3b6860bea867f83e28d -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -499,7 +499,7 @@ dispatch 전에 broker는 provider descriptor 정책의 SchemaProvider 모델 �
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider에 승인된 descriptor가 없어서 카탈로그를 알 수 없다 |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | 카탈로그가 base URL의 그 모델에 가격을 주지 않거나, 그 OpenRouter fallback 중 하나에 가격을 주지 않는다 |
-| `P_MONEY_UNMODELED` | `Failed` | 요청이 SchemaProvider 엔드포인트 호출이다(catalogue는 아직 가격을 매기지 못한다), 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 또는 요청이 OpenRouter plugin을 쓴다 |
+| `P_MONEY_UNMODELED` | `Failed` | 요청이 SchemaProvider 엔드포인트 호출인데 링크된 SchemaProvider 라이브러리가 엔드포인트 호출의 상한을 주지 않는다(capability `EndpointCostBounds`), 요청이 업로드된 파일에 요청들이 들어 있는 OpenAI batch이다, 또는 SDK가 엔드포인트 호출에 모델링되지 않은 이유로 상한을 주지 않는다, 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 또는 요청이 OpenRouter plugin을 쓴다 |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 요청에 출력 토큰 cap이 없다 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 카탈로그가 그 모델의 입력 한도나 context window를 알지 못한다 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | 서버 도구나 hosted tool에 사용 cap이 없거나(Messages `max_uses`, Responses `max_tool_calls`이며 Gemini의 내장 도구와, 정책이 `max_uses`를 허용하지 않는 Messages 타입인 `mcp_toolset`, `tool_search_tool_*`, `code_execution_*` 등에는 없다), router alias처럼 OpenRouter 항목에 route ceiling이 없거나, route ceiling을 `provider.max_price`로 고정할 수 없다 |
@@ -2797,7 +2797,8 @@ The library pre-registers the following components:
 - **사용량, 예산, 취소.**
   - 호출이 보고한 토큰 사용량은 실행의 사용량에 더해진다. 사용량을 보고하지 않는 호출(moderation, 다운로드)은 아무것도 더하지 않으므로, 실행의 다른 호출이 남긴 합계를 지우지 않는다.
   - 호출은 채팅 호출이 거치는 경로를 따른다(`make_endpoint_request`). 실행의 provider 호출 broker가 이를 저널에 남기고 재생하며, Program에서는 호스트가 `add_core_endpoint_node`로 노드를 등록한다.
-  - 모델 토큰 예산이나 managed budget lease는 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부한다. 가격을 매기는 Program binding은 `P_MONEY_UNMODELED`로 거부한다.
+  - 모델 토큰 예산이나 managed budget lease는 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부한다.
+  - 가격을 매기는 Program binding은 엔드포인트 호출을 provider의 model catalogue에 대한 SDK의 준비된 호출 상한(`sp::runtime::endpoint_worst_case_cost`)으로 hold하고, provider가 보고한 비용으로, 없으면 결과에 대한 SDK의 추정(`sp::runtime::endpoint_estimate`)으로 정산한다. SDK가 상한이 없다고 주는 이유마다 호출을 보내기 전에 그 `P_MONEY_*` 코드로 거부한다. 레코드의 `pricing.endpoint`는 엔드포인트, operation, 상한의 line을 담는다. 정책이 provider가 청구하지 않는다고 밝힌 operation의 호출(poll, download, 파일 호출, moderation)에는 가격을 매기지 않는다. OpenRouter에서 embeddings 호출은 extensions가 보내는 가격 상한(`provider.max_price.prompt`)으로만 상한이 정해진다. binding은 그 상한을 모델의 `ceiling_input`으로 낮춰 보내고, 상한이 없는 호출은 `P_MONEY_NO_UPPER_BOUND`로 거부한다. batch나 video submit은 결과가 나중에 오므로 hold가 그대로 청구된다. 업로드된 파일에 요청들이 들어 있는 OpenAI batch는 `P_MONEY_UNMODELED`로 거부한다.
   - Strict Runtime 인터포지션은 채팅 호출만 대상으로 하므로, 엔드포인트 노드가 우회되도록 두지 않고 거부한다.
   - 실행의 취소 토큰과 deadline은 호출에 전달된다.
 
