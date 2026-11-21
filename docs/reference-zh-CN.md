@@ -500,21 +500,23 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider 没有已准入的 descriptor，因此不知道它的目录 |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | 目录没有给出该模型在 base URL 上的价格，或没有给出其某个 OpenRouter 回退的价格 |
-| `P_MONEY_UNMODELED` | `Failed` | 请求是 SchemaProvider 端点调用（catalogue 目前还无法为其定价），或条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin |
+| `P_MONEY_UNMODELED` | `Failed` | 请求是 SchemaProvider 端点调用（catalogue 目前还无法为其定价），或条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin，或按列表费率计价的请求带有图像输入，而条目的 `input_image` 费率高于 SDK 上界计算输入所用的每个输入费率（该上界不读取这个费率；`witness.unmodeled` 为 `image input`，`witness.image_input` 写明条目、单位、其费率和输入费率） |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 目录不知道该模型的输入限制或上下文窗口 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | 服务器工具或 hosted tool 没有使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`；Gemini 的内置工具，以及策略不允许 `max_uses` 的 Messages 类型，如 `mcp_toolset`、`tool_search_tool_*` 和 `code_execution_*`，都没有这类上限），OpenRouter 条目没有 route ceiling（例如 router alias），或 route ceiling 无法作为 `provider.max_price` 固定 |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits`（收费超出预算而结束的运行也用同一个错误码，此时 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by`） |
 
-得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（条目、其价格行、service tier、预留的工具使用和估算的假设）与 `served_by`（处理该调用的上游，见下）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
+得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（条目、其价格行、service tier、预留的工具使用和估算的假设）、`served_by`（处理该调用的上游，见下）与 `billed_tier`（该调用计费所在的 tier，见下）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
 
 | 证据 | 条件 | 金额 |
 |---|---|---|
 | `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，由 SDK 解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额向上取整到整数 microunit。记录仍注明 hold 计价所用的目录和行。 |
-| `estimated` | 没有报告费用的最终且一致的 usage。 | `sp::pricing::estimate` 按计价 hold 时所用的目录快照计算，再加上按使用上限预留的服务器工具费用，每次调用向上取整一次。Messages 的 1 小时缓存写入和 Gemini 的图像 token 按各自的费率计费，OpenRouter 调用按 route ceiling 计费。记录写明 `sp-model-catalogue/1`、目录 digest 以及用于计价的行。 |
+| `estimated` | 没有报告费用的最终且一致的 usage。 | `sp::pricing::estimate` 按计价 hold 时所用的目录快照、在 hold 上界所用的 tier（`billed_tier`）下计算，再加上按使用上限预留的服务器工具费用，每次调用向上取整一次。Messages 的 1 小时缓存写入和 Gemini 的图像 token 按各自的费率计费，OpenRouter 调用按 route ceiling 计费。记录写明 `sp-model-catalogue/1`、目录 digest 以及用于计价的行。 |
 | `held` | 结果未知（transport 异常、取消、超时）、调用失败时可能已有工作开始（HTTP 408、425、429 或 5xx 响应、被切断的流、请求发出后的 transport 失败）、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
 `served_by` 是路由网关声明为处理了该调用的上游：Chat Completions 或 Messages 响应（缓冲或流式）中 OpenRouter 给出的 `provider` 成员，对于策略声明为路由网关的 origin，SchemaProvider 以 `ServedModel::served_by` 报告它。当响应没有给出名称，或名称是记录无法保存的（空、超过 256 字节、不是 UTF-8 或含控制字符），当 origin 不是网关，对 Responses 回复（OpenRouter 的 Responses 回复没有这个成员），以及结果未知时，它不被设置（在 Python 中为 `None`）。凡是来自响应的记录都可以带有它，包括 `held` 记录。名称不会改变该调用的收费，响应的其他内容也不会被保存。它是记录的元数据：位于调用的 identity 和 journal 的摘要之外，而从归档形式恢复的 journal outcome 并不带有它。与调用一起存储的记录带有它，所以重启或崩溃后恢复的记录，以及 fork 从其 source 接管的记录，都保持存储时的值。没有名称的记录字节与以往相同；在这个成员出现之前的构建会拒绝含有它的已存结果或 journal 行。
+
+`billed_tier` 是该调用计费所在的目录 tier：策略映射后的请求 service tier，加上请求中会改变价格的 extension 所指定的 tier（在 Anthropic origin 上，Messages 的 `speed: fast` 按 `fast` 计费），即 `sp::pricing::billed_tier` 给出的值。hold 的上界在这个 tier 下计算，`estimated` 金额也在它之下计价，所以 fast 调用按条目的 `/fast` 行 hold 并收费。每个计价调用的记录都带有它，`held` 和 `reported` 记录也一样；标准费率时它为空，并且不写入编码后的记录，所以这样的记录字节与以往相同。重启或崩溃后恢复的记录，以及 fork 接管的记录，按存储时的金额收费，并保持存储时的 tier。在这个成员出现之前写入的记录没有它，照旧恢复和收费；它是按其 `pricing` 中 `service_tier` 所指的 tier 计价的，没有指定时按标准费率。在这个成员出现之前的构建会拒绝含有它的已存结果或 journal 行。
 
 证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用按报告收费，费用超出预算的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。报告的费用包含固定上限不限制的部分（例如 BYOK 的 upstream 费用）时，以及 upstream 返回的输出多于请求的输出 cap 时，都会出现这种情况（见下面关于输出 cap 的段落）。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
 
