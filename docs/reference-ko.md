@@ -499,7 +499,7 @@ dispatch 전에 broker는 provider descriptor 정책의 SchemaProvider 모델 �
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider에 승인된 descriptor가 없어서 카탈로그를 알 수 없다 |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | 카탈로그가 base URL의 그 모델에 가격을 주지 않거나, 그 OpenRouter fallback 중 하나에 가격을 주지 않는다 |
-| `P_MONEY_UNMODELED` | `Failed` | 요청이 SchemaProvider 엔드포인트 호출이다(catalogue는 아직 가격을 매기지 못한다), 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 요청이 OpenRouter plugin을 쓴다, 또는 목록 요율로 가격이 매겨지는 요청이 이미지 입력을 담고 항목의 `input_image` 요율이 SDK의 상한이 입력을 잡는 모든 입력 요율보다 높다(그 상한은 이 요율을 읽지 않는다. `witness.unmodeled`는 `image input`이고 `witness.image_input`이 항목, 단위, 그 요율, 입력 요율을 담는다) |
+| `P_MONEY_UNMODELED` | `Failed` | 요청이 SchemaProvider 엔드포인트 호출이다(catalogue는 아직 가격을 매기지 못한다), 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 또는 요청이 OpenRouter plugin을 쓴다 |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 요청에 출력 토큰 cap이 없다 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 카탈로그가 그 모델의 입력 한도나 context window를 알지 못한다 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | 서버 도구나 hosted tool에 사용 cap이 없거나(Messages `max_uses`, Responses `max_tool_calls`이며 Gemini의 내장 도구와, 정책이 `max_uses`를 허용하지 않는 Messages 타입인 `mcp_toolset`, `tool_search_tool_*`, `code_execution_*` 등에는 없다), router alias처럼 OpenRouter 항목에 route ceiling이 없거나, route ceiling을 `provider.max_price`로 고정할 수 없다 |
@@ -510,7 +510,7 @@ dispatch 전에 broker는 provider descriptor 정책의 SchemaProvider 모델 �
 | 증거 | 조건 | 금액 |
 |---|---|---|
 | `reported` | 응답에 provider 자체 비용이 있다: OpenRouter `usage.cost`이며 SDK가 nano-USD 단위의 `Usage::provider_cost`로 파싱한다. BYOK이면 보고된 upstream 청구액을 더한다. | 보고 금액을 정수 microunit으로 올림한 값. 기록은 hold를 산정한 카탈로그와 행도 함께 남긴다. |
-| `estimated` | 보고 비용이 없는 최종·일관 usage. | `sp::pricing::estimate`가 hold에 가격을 매길 때의 카탈로그 스냅샷으로, hold의 상한을 잡은 tier(`billed_tier`)에서 계산한 값에, 예약된 서버 도구 요금을 cap만큼 더하고 호출당 한 번 올림. Messages의 1시간 캐시 쓰기와 Gemini의 이미지 토큰은 각자의 요율로, OpenRouter 호출은 route ceiling으로 청구된다. 기록에 `sp-model-catalogue/1`, 카탈로그 digest, 가격을 매긴 행이 남는다. |
+| `estimated` | 보고 비용이 없는 최종·일관 usage. | `sp::pricing::estimate`가 hold에 가격을 매길 때의 카탈로그 스냅샷으로, hold의 상한을 잡은 tier(`billed_tier`)에서 계산한 값에, 예약된 서버 도구 요금을 cap만큼 더하고 호출당 한 번 올림. Messages의 1시간 캐시 쓰기와 Gemini의 이미지 토큰은 각자의 요율로, OpenRouter 호출은 route ceiling으로 청구된다. 이미지를 담았을 수 있는 요청의 usage가 이미지 토큰 수를 세지 않으면 입력은 `input`과 `input_image` 중 더 비싼 요율로 계산된다(가정 `input at input_image`, `conservative`도 켜진다). 기록에 `sp-model-catalogue/1`, 카탈로그 digest, 가격을 매긴 행이 남는다. |
 | `held` | 결과를 모른다(transport 예외, 취소, timeout), 호출이 이미 시작된 작업 뒤에 실패했을 수 있다(HTTP 408·425·429·5xx 응답, 끊긴 스트림, 요청이 나간 뒤의 transport 실패), SDK가 transport 시도를 다시 보냈다, 또는 usage가 부분적이거나 일관되지 않다. | hold. |
 
 `served_by`는 라우팅 게이트웨이가 호출을 처리했다고 알려 주는 업스트림이다. Chat Completions나 Messages 응답(버퍼링이든 스트리밍이든)에서 OpenRouter가 주는 `provider` 멤버이며, 정책이 라우팅 게이트웨이로 선언한 origin에 대해 SchemaProvider가 `ServedModel::served_by`로 알려 준다. 응답이 이름을 주지 않거나 레코드가 담을 수 없는 이름(빈 문자열, 256바이트 초과, UTF-8이 아님, 제어 문자 포함)일 때, origin이 게이트웨이가 아닐 때, Responses 응답(OpenRouter의 Responses 응답에는 그런 멤버가 없다)일 때, 결과를 알 수 없을 때는 설정되지 않는다(Python에서는 `None`). 응답에서 나온 레코드라면 `held` 레코드를 포함해 모두 이를 담을 수 있다. 이름이 호출의 청구액을 바꾸는 일은 없고, 응답의 다른 내용은 저장하지 않는다. 이것은 레코드의 메타데이터이다. 호출의 identity와 journal의 다이제스트 밖에 있고, 아카이브 형태에서 복원되는 journal의 outcome에는 들어 있지 않다. 호출과 함께 저장된 레코드가 이를 담고 있으므로, 재시작이나 크래시 뒤에 복원된 레코드와 fork가 source에서 인수한 레코드는 저장될 때의 값을 그대로 가진다. 이름이 없는 레코드는 이전과 같은 바이트이고, 이 멤버가 생기기 전의 빌드는 이를 담은 저장된 결과나 journal 행을 거부한다.
@@ -545,7 +545,7 @@ OpenRouter origin에서 broker는 요청을 전송용으로 준비하기 전에 
 - 여유를 둔다. `monetary_microunits`는 NeoGraph가 예약하고 기록하는 금액의 한도다. cap을 무시할 수 있는 upstream에 대해서는 provider가 청구하는 금액의 상한이 아니므로, 호스트가 잃어도 감당할 수 있는 금액보다 적게 부여한다.
 
 가격은 호스트가 공급하는 데이터다. 내장 SchemaProvider 카탈로그에는 가격이 하나도 없으므로, 호스트가 모델에 가격을 매기는 카탈로그를 담은 정책을 provider에 줄 때까지 예산이 있는 실행은 가격이 매겨지는 모든 호출을 거부한다. C++에서는 `sp::descriptor::load_policy(family, resources, catalogue)` 또는 `DescriptorPolicy::with_catalogue`를 쓰고, 호스트 레이어는 `sp::descriptor::merge_catalogues`로 병합한다. Python에서는 `load_provider_policy(family_json, resource_json, model_catalogue_json)`가 주어진 카탈로그를 내장 카탈로그 위에 얹는다. 항목의 `pricing`은 단위를 단위당 십진 USD에 대응시킨다(SchemaProvider의 USAGE, "Pricing by the catalogue"):
-- `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, `reasoning`, `output_image`와 `request`.
+- `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, `reasoning`, `output_image`, `input_image`와 `request`.
 - `ceiling_input`, `ceiling_output`, `ceiling_request`: OpenRouter의 route ceiling으로, 모델의 endpoint 가운데 가장 비싼 값이며 broker가 `provider.max_price`로 고정한다.
 - `<unit>/<tier>`: service tier의 가격. `default`, `standard`, `standard_only`가 아닌 tier의 요청은 그 단위만으로 가격이 매겨진다.
 - `<unit>+<tokens>`: long-context 구간. 캐시를 포함한 입력 토큰이 그 수를 넘으면 구간의 단위가 호출 전체에 가격을 매긴다.
