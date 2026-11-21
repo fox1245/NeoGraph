@@ -2690,7 +2690,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\n")
     endif()
     string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES
-        "find_dependency(SchemaProvider 0.4.4 EXACT CONFIG REQUIRED COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})")
+        "find_dependency(SchemaProvider 0.4.5 EXACT CONFIG REQUIRED COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})")
     if(TARGET neograph_async OR (TARGET neograph_llm AND NOT NEOGRAPH_LLM_HOST_ONLY) OR TARGET neograph_mcp_http_server OR TARGET neograph_acp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()

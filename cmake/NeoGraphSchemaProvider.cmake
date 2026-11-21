@@ -5,7 +5,7 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 
 # Pin the SDK source, not a moving branch or release tag.
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
-    "9819a0d2abf49fe1bd38c9a146c20c0c78c03a1d")
+    "ac30d11f40591d8bb57b60b97457baa90814f197")
 
 # What NeoGraph needs of the SDK: the runtime, and the libcurl transport wherever the SDK can have one. The
 # transport runs its own I/O threads, so a single-thread build has none, and neither has a WebAssembly host.
@@ -36,7 +36,7 @@ set(SP_WITH_SODIUM OFF CACHE STRING "Build SchemaProvider without libsodium (Neo
 unset(_neograph_sp_transport)
 
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    find_package(SchemaProvider 0.4.4 EXACT CONFIG QUIET COMPONENTS ${_neograph_sp_required_components})
+    find_package(SchemaProvider 0.4.5 EXACT CONFIG QUIET COMPONENTS ${_neograph_sp_required_components})
     if(NOT SchemaProvider_FOUND)
         if(NOT NEOGRAPH_FETCH_SCHEMAPROVIDER)
             message(FATAL_ERROR
