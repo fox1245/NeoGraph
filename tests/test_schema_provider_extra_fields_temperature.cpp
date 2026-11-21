@@ -51,10 +51,9 @@ TEST(SchemaProviderTypedControls, RoutingDefaultsAndPerCallReplacementRemainExpl
     EXPECT_EQ(body.at("provider").at("allow_fallbacks"), false);
 }
 
-// The SDK no longer installs the routing check that the provider ran on its defaults when it was created. The
-// encoder runs the same check on the merged routing of every request, so a default that no request could carry is
-// refused when a request is prepared, with nothing sent.
-TEST(SchemaProviderTypedControls, RoutingDefaultsTheSdkRefusesAreRefusedWhenARequestIsPrepared) {
+// The SDK installs the routing check again, so a routing default no request could carry is refused when the provider
+// is created, before any request exists, and the refusal names the SDK's reason text.
+TEST(SchemaProviderTypedControls, RoutingDefaultsTheSdkRefusesAreRefusedWhenTheProviderIsCreated) {
     sp::OpenRouterRouting defaults; defaults.only = {"default-provider"}; defaults.ignore = {"default-provider"};
     llm::SchemaProvider::Defaults controls; controls.provider = defaults;
     const auto source = json{{"descriptor_version", 1}, {"revision", 1},
@@ -64,12 +63,28 @@ TEST(SchemaProviderTypedControls, RoutingDefaultsTheSdkRefusesAreRefusedWhenAReq
                        {"streaming", "/api/v1/chat/completions"}}}}}}.dump();
     auto admitted = sp::descriptor::load(source);
     ASSERT_TRUE(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(admitted));
-    std::unique_ptr<llm::SchemaProvider> provider;
-    ASSERT_NO_THROW(provider = llm::SchemaProvider::create(
-        std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted)), {}, controls));
-    auto prepared = provider->prepare(wire::request());
-    ASSERT_FALSE(prepared.valid()); ASSERT_NE(prepared.error(), nullptr);
-    EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);
+    try {
+        (void)llm::SchemaProvider::create(
+            std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted)), {}, controls);
+        FAIL() << "a routing default the encoders refuse must throw at create";
+    } catch (const std::invalid_argument& refusal) {
+        EXPECT_FALSE(std::string(refusal.what()).empty());
+    }
+}
+
+// A routing default is carried only by an OpenRouter origin: on any other origin the provider is not created.
+TEST(SchemaProviderTypedControls, RoutingDefaultsOnAnOriginThatIsNotOpenRouterAreRefusedWhenTheProviderIsCreated) {
+    sp::OpenRouterRouting defaults; defaults.zdr = true;
+    llm::SchemaProvider::Defaults controls; controls.provider = defaults;
+    const auto source = json{{"descriptor_version", 1}, {"revision", 1},
+        {"id", "plain-origin-defaults"}, {"family", "openai.chat"},
+        {"connection", {{"base_url", "https://api.openai.com"},
+            {"paths", {{"buffered", "/v1/chat/completions"},
+                       {"streaming", "/v1/chat/completions"}}}}}}.dump();
+    auto admitted = sp::descriptor::load(source);
+    ASSERT_TRUE(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(admitted));
+    EXPECT_THROW((void)llm::SchemaProvider::create(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted)), {}, controls), std::invalid_argument);
 }
 
 TEST(SchemaProviderTypedControls, RoutingOnUnadmittedOriginNeverLeaksToWire) {
