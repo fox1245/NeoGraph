@@ -142,6 +142,10 @@ std::vector<ProgramMonetaryRecord> journal_monetary_records(const std::string& p
 // Provider double: a real SDK client, a local transport
 // ---------------------------------------------------------------------------
 
+// A fixture model the catalogue prices at standard and fast rows, served at kFastOrigin.
+constexpr std::string_view kFastRowsModel = "vendor/fast-rows";
+constexpr std::string_view kFastOrigin    = "https://api.openai.com";
+
 // The prices a host's catalogue layer gives the fixture models. kModel lists
 // an OpenRouter route ceiling of 0.44 and 1.32 USD per million tokens; the
 // router alias lists none.
@@ -159,6 +163,11 @@ json prices_of(std::string_view model) {
     if (model == "vendor/limitless")
         return json{{"input", "0.000001"}, {"output", "0.000002"},
                     {"ceiling_input", "0.000003"}, {"ceiling_output", "0.000004"}};
+    // Standard rows and, for a request that bills under the "fast" tier, rows at twice the input and four times the
+    // output rate.
+    if (model == kFastRowsModel)
+        return json{{"input", "0.000001"}, {"output", "0.000002"}, {"input/fast", "0.000002"},
+                    {"output/fast", "0.000008"}};
     // A route ceiling below the input price the entry lists: it bounds nothing.
     if (model == "vendor/stale-ceiling")
         return json{{"input", "0.000002"}, {"output", "0.000004"},
@@ -195,6 +204,29 @@ std::function<void(json&)> another_stop_reason(std::string raw) {
 std::function<void(json&)> another_output_cap_member(std::string member) {
     return [member = std::move(member)](json& policy) {
         policy["families"][chat_family_index(policy)]["bindings"]["max_output_tokens"] = member;
+    };
+}
+
+// Admits on openai.chat at `origin` the priced extension the policy admits on anthropic.messages as `speed`, whose
+// value `fast` bills under the catalogue tier `fast`: the policy's own fact, copied to the family the fixtures send.
+std::function<void(json&)> a_priced_speed_at(std::string origin) {
+    return [origin = std::move(origin)](json& policy) {
+        const json families = policy["families"];
+        json       speed;
+        for (std::size_t i = 0; i < families.size(); ++i) {
+            const json family = families[i];
+            if (family.value("family", std::string()) != "anthropic.messages" || !family.contains("extensions"))
+                continue;
+            const json facts = family.at("extensions");
+            for (std::size_t j = 0; j < facts.size(); ++j)
+                if (facts[j].value("key", std::string()) == "speed") speed = facts[j];
+        }
+        if (!speed.is_object()) throw std::logic_error("the policy admits no priced speed extension");
+        speed["origins"] = json::array({json(origin)});
+        const auto index = chat_family_index(policy);
+        json extensions  = families[index].contains("extensions") ? families[index].at("extensions") : json::array();
+        extensions.push_back(speed);
+        policy["families"][index]["extensions"] = extensions;
     };
 }
 
@@ -543,6 +575,8 @@ struct HostOptions {
     std::optional<std::uint64_t> input_limit = kInputLimit;
     std::optional<std::uint64_t> output_cap  = kOutputCap;
     std::optional<std::string>   service_tier;
+    // The Chat Completions extension members the llm_call node sends.
+    std::optional<json>          chat_extensions;
     std::uint64_t monetary     = 1'000'000;  // run budget in micro-USD; 0 grants nothing
     std::uint64_t model_tokens = 1'000'000;
     std::uint64_t wall_time_ms = 10'000;
@@ -680,6 +714,7 @@ public:
             context->model = options_.model;
             context->provider_controls.max_output_tokens = options_.output_cap;
             context->provider_controls.service_tier      = options_.service_tier;
+            context->provider_controls.chat.extensions   = options_.chat_extensions;
         }
         CatalogConfig config{store, *registry_, std::make_shared<EngineGenerationCache>(),
                              "binding-test/v1"};
@@ -1088,6 +1123,85 @@ TEST_P(Priced, WithoutAReportedCostTheEstimateNamesTheCatalog) {
     EXPECT_EQ(record.pricing.at("units").at("ceiling_input"), "0.00000044");
     EXPECT_EQ(record.pricing.at("assumptions"), json::array({"route ceiling"}));
     EXPECT_EQ(result.usage().monetary_microunits, 14U);
+}
+
+namespace {
+
+// A call to kFastRowsModel at kFastOrigin, whose policy prices `speed`; `fast` sends speed fast.
+HostOptions fast_rows_options(bool fast) {
+    HostOptions options;
+    options.origin      = std::string(kFastOrigin);
+    options.model       = std::string(kFastRowsModel);
+    options.edit_policy = a_priced_speed_at(std::string(kFastOrigin));
+    if (fast) options.chat_extensions = json{{"speed", "fast"}};
+    return options;
+}
+
+// A peer whose replies report no cost, so a call settles at the catalogue estimate: 300 input and 40 output tokens.
+std::shared_ptr<Peer> estimating_peer() {
+    auto peer   = std::make_shared<Peer>();
+    peer->reply = [](int, const ProviderRequest&) { return neograph::test::success("answer", final_usage(300, 40)); };
+    return peer;
+}
+
+// The tier a record names as the one its call billed under, as the record is encoded; "" when it names none.
+std::string billed_tier_of(const ProgramMonetaryRecord& record) {
+    const auto encoded = program::detail::encode_monetary_record(record);
+    return encoded.contains("billed_tier") ? encoded.at("billed_tier").get<std::string>() : std::string();
+}
+
+// What the call that `peer` answered sent as `speed`; "" when it sent none.
+std::string sent_speed(Peer& peer) {
+    std::lock_guard lock(peer.mutex);
+    if (peer.bodies.empty()) return {};
+    return json::parse(peer.bodies.front()).value("speed", std::string());
+}
+
+}  // namespace
+
+TEST_P(Priced, AFastCallIsHeldAndSettledAtTheFastRows) {
+    auto       peer   = estimating_peer();
+    auto       h      = host(peer, fast_rows_options(true));
+    const auto result = h->run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(peer->transport.load(), 1);
+    EXPECT_EQ(sent_speed(*peer), "fast");
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record.basis, "list_rates");
+    // Held at the fast rows: kInputLimit input tokens at 2,000 and kOutputCap output tokens at 8,000 nano-USD.
+    EXPECT_EQ(record.reserved_microunits, (kInputLimit * 2'000 + kOutputCap * 8'000) / 1'000);
+    // Settled at them too: 300 input tokens at 2,000 and 40 output tokens at 8,000 nano-USD, not the standard 380.
+    EXPECT_EQ(record.microunits, (300U * 2'000 + 40 * 8'000) / 1'000);
+    EXPECT_LE(record.microunits, record.reserved_microunits);
+    EXPECT_EQ(billed_tier_of(record), "fast");
+    EXPECT_EQ(result.usage().monetary_microunits, 920U);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - 920U);
+    if (durable()) {
+        const auto row = h->journal().inspect(kOwner, record.call_id);
+        ASSERT_TRUE(row);
+        ASSERT_TRUE(row->monetary_record);
+        EXPECT_EQ(*row->monetary_record, record);
+    }
+    const auto stored = ProgramResult::parse(result.serialize_canonical());
+    EXPECT_EQ(stored.monetary_records(), result.monetary_records());
+}
+
+TEST_P(Priced, AnOrdinaryCallAtAModelWithFastRowsIsSettledAtTheStandardRows) {
+    auto       peer   = estimating_peer();
+    auto       h      = host(peer, fast_rows_options(false));
+    const auto result = h->run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(sent_speed(*peer), "");
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record.reserved_microunits, (kInputLimit * 1'000 + kOutputCap * 2'000) / 1'000);
+    EXPECT_EQ(record.microunits, (300U * 1'000 + 40 * 2'000) / 1'000);
+    EXPECT_EQ(billed_tier_of(record), "");
+    EXPECT_FALSE(program::detail::encode_monetary_record(record).contains("billed_tier"))
+        << "a record at the standard rates keeps the bytes it had";
 }
 
 TEST_P(Priced, PartialUsageKeepsTheHold) {
@@ -2773,8 +2887,8 @@ struct ScopedSimulatedClock {
 
 // A define()-only run without child budgets holds a root execution lease. The process dies after the run's model
 // call is journaled; `crashed` is a copy of what it had made durable.
-void crash_after_the_journaled_call(const TempDir& files, const TempDir& image, const HostOptions& options) {
-    auto peer = std::make_shared<Peer>();
+void crash_after_the_journaled_call(const TempDir& files, const TempDir& image, const HostOptions& options,
+                                     std::shared_ptr<Peer> peer = std::make_shared<Peer>()) {
     Host h(peer, options, &files);
     bool taken = false;
     h.script().after = [&](const std::string&) {
@@ -2833,6 +2947,42 @@ TEST(ProgramProviderBindingJournal, ALeasedRootRecoveredBeforeItsDeadlineCharges
     EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - 1235U);
     EXPECT_EQ(result.remaining_budget().wall_time_ms, options.wall_time_ms - 1'000)
         << "recovery keeps the run's absolute wall deadline";
+}
+
+TEST(ProgramProviderBindingJournal, ARecoveredRunChargesItsJournaledFastCallAtTheFastRows) {
+    // The run dies after its fast call is journaled. Recovery does not send the call again: it charges the record the
+    // call was settled with, at the fast rows and naming the fast tier, and the record keeps that tier.
+    ScopedSimulatedClock clock;
+    TempDir     files("fast-takeover");
+    TempDir     image("fast-takeover-image");
+    auto        options  = fast_rows_options(true);
+    options.wall_time_ms = 60'000;
+    crash_after_the_journaled_call(files, image, options, estimating_peer());
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
+    const auto stored = journal_monetary_records(image.provider_db());
+    ASSERT_EQ(stored.size(), 1U);
+    EXPECT_EQ(stored.front().microunits, 920U);
+    EXPECT_EQ(billed_tier_of(stored.front()), "fast");
+    clock.clock.advance(std::chrono::milliseconds(1'000));
+    auto recovery = estimating_peer();
+    Host restarted(recovery, options, &image);
+    const auto result = restarted.runtime().reconnect(kOwner, "lease-run").wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(recovery->transport.load(), 0) << "the journaled request is not sent again";
+    ASSERT_EQ(result.monetary_records().size(), 1U) << "charged once";
+    const auto& record = result.monetary_records().front();
+    EXPECT_TRUE(record.replayed);
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record.microunits, 920U) << "the fast rows, not the standard 380";
+    EXPECT_EQ(billed_tier_of(record), "fast");
+    auto unreplayed     = record;
+    unreplayed.replayed = false;
+    EXPECT_EQ(unreplayed, stored.front()) << "the restored record is the stored one but for the mark";
+    EXPECT_EQ(result.usage().monetary_microunits, 920U);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - 920U);
+    // The stored end keeps the record as the journal does.
+    const auto end = ProgramResult::parse(result.serialize_canonical());
+    EXPECT_EQ(end.monetary_records(), result.monetary_records());
 }
 
 TEST(ProgramProviderBindingJournal, AnUncertainDispatchIsHeldAcrossARestart) {
