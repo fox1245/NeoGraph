@@ -10,6 +10,11 @@ import neograph_engine.llm as nglm
 
 
 TEMPERATURE_PROHIBITED = "request.choice.temperature_is_prohibited_for_the_admitted"
+# The reason each family's encoder gives for a prohibited temperature (the Messages encoder has its own).
+TEMPERATURE_PROHIBITED_BY_FAMILY = {
+    "openai.chat": TEMPERATURE_PROHIBITED,
+    "anthropic.messages": "request.messages.temperature_is_prohibited_for_this_model",
+}
 
 
 def _policy(peer, *, routed=True, forbid_temperature=()):
@@ -451,7 +456,7 @@ def test_model_temperature_prohibition_is_closed_before_io(typed_peer, family, m
     controls = _controls(temperature=0.7)
     if family == "anthropic.messages":
         controls.thinking_mode = ng.MessagesThinkingMode.Adaptive
-    _rejected(typed_peer, provider, controls, model=model, reason=TEMPERATURE_PROHIBITED)
+    _rejected(typed_peer, provider, controls, model=model, reason=TEMPERATURE_PROHIBITED_BY_FAMILY[family])
     controls.temperature = None
     _success(provider, _request(provider, controls, model=model))
     assert "temperature" not in typed_peer.requests[0]["body"]
