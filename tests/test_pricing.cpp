@@ -777,6 +777,129 @@ TEST(PricingWorstCase, TheHoldIsTheSdkBoundAndCountsServerToolFeesOncePerAttempt
     EXPECT_EQ(capped.quote->tool_fees_nano_usd, 30'000'000U);
 }
 
+TEST(PricingWorstCase, AnImageInputRateAboveTheInputRatesOfTheBoundIsRefusedAsUnmodeled) {
+    // The SDK's bound holds an image the request carries at the entry's input rates; it never reads input_image.
+    auto dear           = kListed;
+    dear["input_image"] = "0.000009";
+    auto level           = kListed;
+    level["input_image"] = "0.000001";
+    auto provider = provider_at("openai.chat", "https://api.openai.com",
+                                {model_with("image-dear", 1'000, dear), model_with("image-level", 1'000, level),
+                                 model_with("plain", 1'000, kListed)});
+    const auto picture = priced(*provider, chat_request(*provider, "image-dear", true));
+    ASSERT_TRUE(picture.prepared.valid())
+        << (picture.prepared.error() ? picture.prepared.error()->safe_message : std::string());
+    ASSERT_TRUE(picture.quote);
+    EXPECT_EQ(picture.quote->blocker, "P_MONEY_UNMODELED") << picture.quote->blocker_message;
+    EXPECT_EQ(picture.quote->hold, 0U);
+    EXPECT_EQ(picture.quote->witness.value("unmodeled", std::string()), "image input");
+    ASSERT_TRUE(picture.quote->witness.contains("image_input")) << picture.quote->witness.dump();
+    const auto& row = picture.quote->witness.at("image_input");
+    EXPECT_EQ(row.value("entry", std::string()), "image-dear");
+    EXPECT_EQ(row.value("unit", std::string()), "input_image");
+    EXPECT_EQ(row.value("rate", std::string()), "0.000009");
+    EXPECT_EQ(row.value("input_rate", std::string()), "0.000001");
+    // Assessed directly, the same request is refused the same way.
+    const auto direct = program::detail::assess_monetary_call({}, provider->prepare(chat_request(*provider, "image-dear", true)));
+    EXPECT_EQ(direct.blocker, "P_MONEY_UNMODELED");
+
+    // Without an image the same entry holds as before: 1,000 input tokens at 1,000 and 100 output at 2,000 nano-USD.
+    const auto text = priced(*provider, chat_request(*provider, "image-dear", false));
+    ASSERT_TRUE(text.quote);
+    ASSERT_TRUE(text.quote->blocker.empty()) << text.quote->blocker_message;
+    EXPECT_EQ(text.quote->hold, 1'000U + 200);
+    // An input_image rate no dearer than the input rate, and an entry without one, hold an image as before.
+    for (const auto* model : {"image-level", "plain"}) {
+        SCOPED_TRACE(model);
+        const auto held = priced(*provider, chat_request(*provider, model, true));
+        ASSERT_TRUE(held.quote);
+        ASSERT_TRUE(held.quote->blocker.empty()) << held.quote->blocker_message;
+        EXPECT_EQ(held.quote->hold, 1'000U + 200);
+        EXPECT_EQ(held.quote->hold, sdk_hold(held.prepared, *held.quote));
+    }
+}
+
+TEST(PricingWorstCase, AnImageAtTheRouteCeilingIsHeldAtTheCeiling) {
+    // At the route ceiling every input token is held at ceiling_input, which the SDK refuses below a listed
+    // input_image rate (AStaleRouteCeilingIsRefusedAsStale): an input_image above input and below the ceiling holds.
+    auto provider = provider_at(
+        "openai.chat", std::string(kOpenRouter),
+        {model_with("vendor/image-ceiling", 1'000,
+                    json{{"input", "0.000001"}, {"output", "0.000002"}, {"input_image", "0.000002"},
+                         {"ceiling_input", "0.000003"}, {"ceiling_output", "0.000004"}})});
+    const auto picture = priced(*provider, chat_request(*provider, "vendor/image-ceiling", true));
+    ASSERT_TRUE(picture.prepared.valid())
+        << (picture.prepared.error() ? picture.prepared.error()->safe_message : std::string());
+    ASSERT_TRUE(picture.quote);
+    ASSERT_TRUE(picture.quote->blocker.empty()) << picture.quote->blocker_message;
+    // 1,000 input tokens at 3,000 and 100 output tokens at 4,000 nano-USD.
+    EXPECT_EQ(picture.quote->hold, 3'000U + 400);
+    EXPECT_EQ(picture.quote->hold_basis, "route_ceiling");
+}
+
+namespace {
+
+// The tier a record names as the one its call billed under, as the record is encoded; "" when it names none.
+std::string billed_tier_of(const ProgramMonetaryRecord& record) {
+    const auto encoded = program::detail::encode_monetary_record(record);
+    return encoded.contains("billed_tier") ? encoded.at("billed_tier").get<std::string>() : std::string();
+}
+
+}  // namespace
+
+TEST(MonetarySettle, AFastCallIsSettledAtTheFastRowsItWasHeldAt) {
+    auto provider = fast_messages_provider();
+    const auto fast = priced(*provider, messages_request(*provider, "with-fast", json{{"speed", "fast"}}));
+    ASSERT_TRUE(fast.quote);
+    ASSERT_TRUE(fast.quote->blocker.empty()) << fast.quote->blocker_message;
+    const auto& quote = *fast.quote;
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+    // 300 input tokens at 2,000 and 40 output tokens at 8,000 nano-USD: the fast rows, not the standard 380.
+    const auto record = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", neograph::test::usage(300, 40, 340)));
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record->microunits, (300U * 2'000 + 40 * 8'000) / 1'000);
+    EXPECT_LE(record->microunits, record->reserved_microunits);
+    EXPECT_EQ(billed_tier_of(*record), "fast");
+    // The record of a call whose outcome is unknown names the tier as well.
+    EXPECT_EQ(billed_tier_of(program::detail::unknown_outcome_record(quote, site, "the outcome is unknown")), "fast");
+
+    // At the usage the hold bounds (1,000 input and 100 output tokens) the settled amount is the hold, never below it.
+    const auto bounded = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", neograph::test::usage(1'000, 100, 1'100)));
+    ASSERT_TRUE(bounded);
+    EXPECT_EQ(bounded->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(bounded->microunits, quote.hold);
+    EXPECT_EQ(bounded->microunits, 2'000U + 800);
+    // And for every usage within the bounds the settled amount is at most the hold.
+    for (const std::uint64_t input : {0U, 1U, 299U, 999U, 1'000U})
+        for (const std::uint64_t output : {0U, 1U, 99U, 100U}) {
+            const auto settled = program::detail::settle_monetary_call(
+                quote, site, neograph::test::success("answer", neograph::test::usage(input, output, input + output)));
+            ASSERT_TRUE(settled);
+            EXPECT_LE(settled->microunits, quote.hold) << input << " input and " << output << " output tokens";
+        }
+}
+
+TEST(MonetarySettle, AnOrdinaryCallIsSettledAsBeforeAndItsRecordNamesNoTier) {
+    auto provider = fast_messages_provider();
+    for (const auto& extensions : {json(), json{{"speed", "standard"}}}) {
+        SCOPED_TRACE(extensions.dump());
+        const auto standard = priced(*provider, messages_request(*provider, "with-fast", extensions));
+        ASSERT_TRUE(standard.quote);
+        ASSERT_TRUE(standard.quote->blocker.empty()) << standard.quote->blocker_message;
+        const auto record = program::detail::settle_monetary_call(
+            *standard.quote, {"call", "operation", "node"},
+            neograph::test::success("answer", neograph::test::usage(300, 40, 340)));
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Estimated);
+        EXPECT_EQ(record->microunits, (300U * 1'000 + 40 * 2'000) / 1'000);
+        EXPECT_EQ(billed_tier_of(*record), "");
+        EXPECT_FALSE(program::detail::encode_monetary_record(*record).contains("billed_tier"));
+    }
+}
+
 TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
     auto       provider = responses_provider();
     const auto searched = priced_search(*provider, "fees", 2);
@@ -977,6 +1100,41 @@ TEST(PricingRecord, AnUpstreamIsInTheEncodedRecordOnlyWhenThereIsOne) {
     auto unusable = plain;
     unusable.served_by = std::string("\xff");
     EXPECT_THROW(program::detail::validate_monetary_record(unusable), std::invalid_argument);
+}
+
+TEST(MonetaryRecord, ABilledTierIsInTheEncodedRecordOnlyWhenTheCallBilledUnderOne) {
+    // A record of the shape written before the tier was kept: an estimate at the tier its pricing names.
+    const auto old_record = json::parse(
+        R"({"call_id":"call","operation_id":"op","node":"llm","origin":"https://api.anthropic.com","model":"with-fast",)"
+        R"("evidence":"estimated","microunits":380,"reserved_microunits":1200,"basis":"list_rates",)"
+        R"("catalog_version":"sp-model-catalogue/1","catalog_digest":"sha256:)" + std::string(64, 'a') +
+        R"(","conservative":false,"may_undercount":false,"replayed":false,"reason":"",)"
+        R"("pricing":{"entry":"with-fast","units":{"input":"0.000001","output":"0.000002"}}})");
+    // It decodes without a tier, charges what it stored and encodes to the bytes it had.
+    const auto plain = program::detail::decode_monetary_record(old_record);
+    EXPECT_EQ(billed_tier_of(plain), "");
+    EXPECT_EQ(plain.microunits, 380U);
+    EXPECT_EQ(program::detail::encode_monetary_record(plain).dump(), old_record.dump());
+    ProgramMonetaryAccount account(10'000, 1);
+    EXPECT_TRUE(account.restore("old", plain));
+    EXPECT_EQ(account.used(), 380U) << "an old record is charged what it stored";
+
+    auto fast           = old_record;
+    fast["billed_tier"] = "fast";
+    fast["microunits"]  = 920;
+    const auto decoded  = program::detail::decode_monetary_record(fast);
+    EXPECT_EQ(billed_tier_of(decoded), "fast");
+    EXPECT_EQ(program::detail::encode_monetary_record(decoded).dump(), fast.dump());
+    EXPECT_NE(decoded, plain);
+
+    // A stored tier this code does not write is corrupt, not ignored.
+    for (const json bad : {json(""), json("two\nlines"), json(std::string(513, 't')), json(7), json(nullptr),
+                           json::array()}) {
+        SCOPED_TRACE(bad.dump());
+        auto corrupt           = old_record;
+        corrupt["billed_tier"] = bad;
+        EXPECT_THROW((void)program::detail::decode_monetary_record(corrupt), std::invalid_argument);
+    }
 }
 
 TEST(PricingRecord, A015RecordKeepsItsBytesAndANewOneCarriesItsPricing) {
