@@ -15,17 +15,23 @@
 namespace neograph::test::endpoints {
 using namespace std::chrono_literals;
 
+// Appends `origin` to every array of the policy that lists `provider`. The policy also names a provider origin as a
+// single value (a listing's default origin), which stays as it is.
+inline void admit_origin(json& node, const std::string& provider, const std::string& origin) {
+    if (!node.is_array() && !node.is_object()) return;
+    bool lists_provider = false;
+    for (auto child : node) {
+        if (node.is_array() && child.is_string() && child.get<std::string>() == provider) lists_provider = true;
+        else admit_origin(child, provider, origin);
+    }
+    if (lists_provider) node.push_back(json(origin));
+}
+
 inline sp::descriptor::PolicySnapshot policy_at(const std::string& origin,
                                                 const std::vector<std::string>& providers = {"https://api.openai.com"}) {
-    auto policy = json::parse(sp::config_defaults::descriptor_policy_json).dump();
-    for (const auto& provider : providers) {
-        const auto quoted = "\"" + provider + "\"";
-        for (auto at = policy.find(quoted); at != std::string::npos; at = policy.find(quoted, at + 1)) {
-            const auto added = quoted + ",\"" + origin + "\"";
-            policy.replace(at, quoted.size(), added);
-            at += added.size() - 1;
-        }
-    }
+    auto document = json::parse(sp::config_defaults::descriptor_policy_json);
+    for (const auto& provider : providers) admit_origin(document, provider, origin);
+    const auto policy = document.dump();
     auto admitted = sp::descriptor::load_policy(policy, sp::config_defaults::codec_defaults_json);
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
         throw std::invalid_argument(error->pointer + ": " + error->message);
