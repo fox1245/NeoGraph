@@ -217,12 +217,15 @@ TEST(SchemaProviderInterface, LinkedAbiGateAdmitsRealPreparedDispatch) {
     }
     // The bits of the headers' later layouts: the transport's connection cache, the model-control facts and typed tool
     // choice of a chat request, the realtime defaults and response bound, the voice id of a chat request, the priced
-    // extensions, and the endpoint tier and pin. A library built before any of them has smaller structs than these
-    // headers read, so NeoGraph requires every one and refuses it.
+    // extensions, the endpoint tier and pin, the cached audio price, the decision assets and the provider file shape.
+    // A library built before any of them has smaller structs than these headers read, so NeoGraph requires every one
+    // and refuses it.
     for (const auto bit : {sp::capability::TransportConnectionCache, sp::capability::ModelControlFacts,
                            sp::capability::TypedToolChoice, sp::capability::RealtimeRuntimeDefaults,
                            sp::capability::ChatVoiceId, sp::capability::PricedExtensions,
-                           sp::capability::EndpointTierAndPin, sp::capability::RealtimeResponseBound}) {
+                           sp::capability::EndpointTierAndPin, sp::capability::RealtimeResponseBound,
+                           sp::capability::CachedAudioPrice, sp::capability::DecisionAssets,
+                           sp::capability::ProviderFileShape}) {
         EXPECT_NE(sp::runtime::interface_contract().capabilities & bit, 0U);
         EXPECT_NE(sp::capability::RequiredProvider & bit, 0U);
     }
