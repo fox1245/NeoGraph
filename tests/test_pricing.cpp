@@ -409,10 +409,10 @@ TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
     ASSERT_TRUE(free.quote);
     EXPECT_EQ(free.quote->hold, 4U * (1'000 + 200));
 
-    // A call the hold does not price yet.
-    program::detail::MonetaryRequestFacts endpoint;
-    endpoint.unpriced = "SchemaProvider endpoint calls";
-    EXPECT_EQ(program::detail::assess_monetary_call(endpoint, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
+    // A call the hold does not price at all.
+    program::detail::MonetaryRequestFacts unpriced;
+    unpriced.unpriced = "a feature the catalogue cannot price";
+    EXPECT_EQ(program::detail::assess_monetary_call(unpriced, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
 
     // A routing gateway needs a route ceiling, and a ceiling needs a gateway.
     auto routed = provider_at("openai.chat", std::string(kOpenRouter),
