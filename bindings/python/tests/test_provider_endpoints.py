@@ -114,11 +114,28 @@ def peer():
         peer.close()
 
 
+def _admit_origin(node, anchor, origin):
+    """Appends `origin` to every list of `node` that names `anchor`. A single value naming `anchor` (a listing's
+    default origin) stays as it is."""
+    if isinstance(node, dict):
+        for child in node.values():
+            _admit_origin(child, anchor, origin)
+    elif isinstance(node, list):
+        names_anchor = False
+        for child in node:
+            if child == anchor:
+                names_anchor = True
+            else:
+                _admit_origin(child, anchor, origin)
+        if names_anchor:
+            node.append(origin)
+
+
 def _policy_at(origin, anchor=OPENAI):
     """The built-in policy, with every list that names `anchor` also naming `origin`."""
-    text = json.dumps(json.loads(ng.provider_policy_json()), separators=(",", ":"))
-    named = f'"{anchor}"'
-    return ng.load_provider_policy(text.replace(named, f'{named},"{origin}"'), ng.provider_codec_defaults_json())
+    document = json.loads(ng.provider_policy_json())
+    _admit_origin(document, anchor, origin)
+    return ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json())
 
 
 def _descriptor(origin, family="openai.chat", anchor=OPENAI):
