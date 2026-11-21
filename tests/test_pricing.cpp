@@ -777,8 +777,9 @@ TEST(PricingWorstCase, TheHoldIsTheSdkBoundAndCountsServerToolFeesOncePerAttempt
     EXPECT_EQ(capped.quote->tool_fees_nano_usd, 30'000'000U);
 }
 
-TEST(PricingWorstCase, AnImageInputRateAboveTheInputRatesOfTheBoundIsRefusedAsUnmodeled) {
-    // The SDK's bound holds an image the request carries at the entry's input rates; it never reads input_image.
+TEST(PricingWorstCase, AnImageChatRequestUnderAnEntryWhoseInputImageIsAboveInputIsHeldAtTheInputImageRate) {
+    // The SDK's bound of a request that may carry an image holds its input at the dearest input rate, input_image
+    // included.
     auto dear           = kListed;
     dear["input_image"] = "0.000009";
     auto level           = kListed;
@@ -786,29 +787,27 @@ TEST(PricingWorstCase, AnImageInputRateAboveTheInputRatesOfTheBoundIsRefusedAsUn
     auto provider = provider_at("openai.chat", "https://api.openai.com",
                                 {model_with("image-dear", 1'000, dear), model_with("image-level", 1'000, level),
                                  model_with("plain", 1'000, kListed)});
+    // 1,000 input tokens at 9,000 and 100 output tokens at 2,000 nano-USD.
     const auto picture = priced(*provider, chat_request(*provider, "image-dear", true));
     ASSERT_TRUE(picture.prepared.valid())
         << (picture.prepared.error() ? picture.prepared.error()->safe_message : std::string());
     ASSERT_TRUE(picture.quote);
-    EXPECT_EQ(picture.quote->blocker, "P_MONEY_UNMODELED") << picture.quote->blocker_message;
-    EXPECT_EQ(picture.quote->hold, 0U);
-    EXPECT_EQ(picture.quote->witness.value("unmodeled", std::string()), "image input");
-    ASSERT_TRUE(picture.quote->witness.contains("image_input")) << picture.quote->witness.dump();
-    const auto& row = picture.quote->witness.at("image_input");
-    EXPECT_EQ(row.value("entry", std::string()), "image-dear");
-    EXPECT_EQ(row.value("unit", std::string()), "input_image");
-    EXPECT_EQ(row.value("rate", std::string()), "0.000009");
-    EXPECT_EQ(row.value("input_rate", std::string()), "0.000001");
-    // Assessed directly, the same request is refused the same way.
+    ASSERT_TRUE(picture.quote->blocker.empty()) << picture.quote->blocker_message;
+    EXPECT_EQ(picture.quote->hold, 9'000U + 200);
+    EXPECT_EQ(picture.quote->hold, sdk_hold(picture.prepared, *picture.quote));
+    EXPECT_EQ(picture.quote->hold_basis, "list_rates");
+    EXPECT_FALSE(picture.quote->witness.contains("unmodeled")) << picture.quote->witness.dump();
+    // Assessed directly, the same request is held the same way.
     const auto direct = program::detail::assess_monetary_call({}, provider->prepare(chat_request(*provider, "image-dear", true)));
-    EXPECT_EQ(direct.blocker, "P_MONEY_UNMODELED");
+    ASSERT_TRUE(direct.blocker.empty()) << direct.blocker_message;
+    EXPECT_EQ(direct.hold, 9'000U + 200);
 
-    // Without an image the same entry holds as before: 1,000 input tokens at 1,000 and 100 output at 2,000 nano-USD.
+    // Without an image the same entry holds at the input rate: 1,000 input tokens at 1,000 and 100 output at 2,000.
     const auto text = priced(*provider, chat_request(*provider, "image-dear", false));
     ASSERT_TRUE(text.quote);
     ASSERT_TRUE(text.quote->blocker.empty()) << text.quote->blocker_message;
     EXPECT_EQ(text.quote->hold, 1'000U + 200);
-    // An input_image rate no dearer than the input rate, and an entry without one, hold an image as before.
+    // An input_image rate no dearer than the input rate, and an entry without one, hold an image at the input rate.
     for (const auto* model : {"image-level", "plain"}) {
         SCOPED_TRACE(model);
         const auto held = priced(*provider, chat_request(*provider, model, true));
@@ -898,6 +897,90 @@ TEST(MonetarySettle, AnOrdinaryCallIsSettledAsBeforeAndItsRecordNamesNoTier) {
         EXPECT_EQ(billed_tier_of(*record), "");
         EXPECT_FALSE(program::detail::encode_monetary_record(*record).contains("billed_tier"));
     }
+}
+
+namespace {
+
+// A provider whose entries list `input_image` above, level with and not at all against `input`.
+std::shared_ptr<Provider> image_rate_provider() {
+    auto dear           = kListed;
+    dear["input_image"] = "0.000009";
+    auto level           = kListed;
+    level["input_image"] = "0.000001";
+    return provider_at("openai.chat", "https://api.openai.com",
+                       {model_with("image-dear", 1'000, dear), model_with("image-level", 1'000, level),
+                        model_with("plain", 1'000, kListed)});
+}
+
+bool names_assumption(const ProgramMonetaryRecord& record, const std::string& rule) {
+    if (!record.pricing.contains("assumptions")) return false;
+    for (const auto& assumption : record.pricing.at("assumptions"))
+        if (assumption.get<std::string>() == rule) return true;
+    return false;
+}
+
+}  // namespace
+
+TEST(MonetarySettle, AnImageCallWhoseUsageCountsNoImageTokensIsSettledAtTheDearerInputRate) {
+    auto provider = image_rate_provider();
+    const auto picture = priced(*provider, chat_request(*provider, "image-dear", true));
+    ASSERT_TRUE(picture.quote);
+    ASSERT_TRUE(picture.quote->blocker.empty()) << picture.quote->blocker_message;
+    const auto& quote = *picture.quote;
+    ASSERT_EQ(quote.hold, 9'000U + 200);
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+    // A Chat usage that does not say how many input tokens were image tokens: 300 input tokens at the dearer
+    // input_image rate of 9,000 and 40 output tokens at 2,000 nano-USD, under the SDK's assumption.
+    const auto record = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", neograph::test::usage(300, 40, 340)));
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record->microunits, (300U * 9'000 + 40 * 2'000) / 1'000);
+    EXPECT_LE(record->microunits, quote.hold);
+    EXPECT_TRUE(names_assumption(*record, "input at input_image")) << record->pricing.dump();
+    EXPECT_TRUE(record->conservative) << "the input was priced at a rate it may not have billed at";
+
+    // At the usage the hold bounds the settled amount is the hold, and for every usage within the bounds it is
+    // never above it.
+    const auto bounded = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", neograph::test::usage(1'000, 100, 1'100)));
+    ASSERT_TRUE(bounded);
+    EXPECT_EQ(bounded->microunits, quote.hold);
+    for (const std::uint64_t input : {0U, 1U, 299U, 999U, 1'000U})
+        for (const std::uint64_t output : {0U, 1U, 99U, 100U}) {
+            const auto settled = program::detail::settle_monetary_call(
+                quote, site, neograph::test::success("answer", neograph::test::usage(input, output, input + output)));
+            ASSERT_TRUE(settled);
+            EXPECT_LE(settled->microunits, quote.hold) << input << " input and " << output << " output tokens";
+        }
+
+    // An entry whose input_image is level with its input settles at that rate and assumes nothing.
+    const auto level = priced(*provider, chat_request(*provider, "image-level", true));
+    ASSERT_TRUE(level.quote);
+    ASSERT_TRUE(level.quote->blocker.empty()) << level.quote->blocker_message;
+    const auto level_record = program::detail::settle_monetary_call(
+        *level.quote, site, neograph::test::success("answer", neograph::test::usage(300, 40, 340)));
+    ASSERT_TRUE(level_record);
+    EXPECT_EQ(level_record->microunits, (300U * 1'000 + 40 * 2'000) / 1'000);
+    EXPECT_FALSE(names_assumption(*level_record, "input at input_image"));
+    EXPECT_FALSE(level_record->conservative);
+}
+
+TEST(MonetarySettle, ATextOnlyCallIsHeldAndSettledAtTheInputRateWhereTheEntryListsInputImage) {
+    auto provider = image_rate_provider();
+    const auto text = priced(*provider, chat_request(*provider, "image-dear", false));
+    ASSERT_TRUE(text.quote);
+    ASSERT_TRUE(text.quote->blocker.empty()) << text.quote->blocker_message;
+    EXPECT_EQ(text.quote->hold, 1'000U + 200);
+    const auto record = program::detail::settle_monetary_call(
+        *text.quote, {"call", "operation", "node"},
+        neograph::test::success("answer", neograph::test::usage(300, 40, 340)));
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record->microunits, (300U * 1'000 + 40 * 2'000) / 1'000);
+    EXPECT_FALSE(names_assumption(*record, "input at input_image"));
+    EXPECT_FALSE(record->conservative);
+    EXPECT_LE(record->microunits, text.quote->hold);
 }
 
 TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
