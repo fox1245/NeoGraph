@@ -470,7 +470,7 @@ dispatch の前に broker は、provider の descriptor ポリシーが持つ Sc
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider に許可された descriptor がなく、カタログが分からない |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | カタログが base URL のそのモデルに価格を付けていない、またはその OpenRouter fallback のいずれかに価格を付けていない |
-| `P_MONEY_UNMODELED` | `Failed` | リクエストが SchemaProvider のエンドポイント呼び出しである（catalogue はまだ価格を付けられない）、項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、リクエストが OpenRouter の plugin を使う、あるいは掲載レートで価格が付くリクエストが画像入力を含み、項目の `input_image` のレートが、SDK の上限が入力を見積もるどの入力レートよりも高い（その上限はこのレートを読みません。`witness.unmodeled` は `image input` で、`witness.image_input` が項目、単位、そのレート、入力レートを示します） |
+| `P_MONEY_UNMODELED` | `Failed` | リクエストが SchemaProvider のエンドポイント呼び出しである（catalogue はまだ価格を付けられない）、項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、あるいはリクエストが OpenRouter の plugin を使う |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | カタログがそのモデルの入力上限もコンテキストウィンドウも知らない |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | サーバーツールや hosted tool に使用 cap がない（Messages の `max_uses`、Responses の `max_tool_calls`。Gemini の組み込みツールと、ポリシーが `max_uses` を認めない Messages の型である `mcp_toolset`、`tool_search_tool_*`、`code_execution_*` などにはない）、router alias のように OpenRouter の項目に route ceiling がない、または route ceiling を `provider.max_price` として固定できない |
@@ -481,7 +481,7 @@ dispatch の前に broker は、provider の descriptor ポリシーが持つ Sc
 | 証拠 | 条件 | 金額 |
 |---|---|---|
 | `reported` | 応答に provider 自身の費用がある：OpenRouter の `usage.cost` で、SDK が nano-USD 単位の `Usage::provider_cost` にパースします。BYOK なら報告された upstream の請求額を加えます。 | 報告額を整数 microunit に切り上げた値。記録には hold の算定に使ったカタログと行も残ります。 |
-| `estimated` | 報告費用のない最終で一貫した usage。 | `sp::pricing::estimate` が hold に価格を付けたときのカタログのスナップショットから、hold の上限を求めた tier（`billed_tier`）で求めた値に、予約したサーバーツール料金を cap の分だけ加え、呼び出しごとに 1 回切り上げ。Messages の 1 時間キャッシュ書き込みと Gemini の画像トークンはそれぞれ固有の料金で、OpenRouter の呼び出しは route ceiling で請求されます。記録には `sp-model-catalogue/1`、カタログの digest、価格を付けた行が残ります。 |
+| `estimated` | 報告費用のない最終で一貫した usage。 | `sp::pricing::estimate` が hold に価格を付けたときのカタログのスナップショットから、hold の上限を求めた tier（`billed_tier`）で求めた値に、予約したサーバーツール料金を cap の分だけ加え、呼び出しごとに 1 回切り上げ。Messages の 1 時間キャッシュ書き込みと Gemini の画像トークンはそれぞれ固有の料金で、OpenRouter の呼び出しは route ceiling で請求されます。画像を含みうるリクエストの usage が画像トークン数を数えていない場合、入力は `input` と `input_image` のうち高い方の料金で計算されます（前提 `input at input_image`。`conservative` も立ちます）。記録には `sp-model-catalogue/1`、カタログの digest、価格を付けた行が残ります。 |
 | `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、すでに始まった処理の後に失敗した可能性がある（HTTP 408、425、429、5xx の応答、途中で切れたストリーム、リクエストが出た後の transport 失敗）、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
 
 `served_by` は、ルーティングゲートウェイが呼び出しを処理したと示すアップストリームです。Chat Completions または Messages の応答（バッファ付きでもストリーミングでも）にある OpenRouter の `provider` メンバーで、ポリシーがルーティングゲートウェイと宣言した origin について SchemaProvider が `ServedModel::served_by` で報告します。応答が名前を示さない場合や、レコードが保持できない名前（空、256 バイト超、UTF-8 でない、制御文字を含む）の場合、origin がゲートウェイでない場合、Responses の応答（OpenRouter の Responses 応答にはこのメンバーがありません）の場合、結果が不明な場合は未設定です（Python では `None`）。応答に由来するレコードであれば、`held` のレコードを含め、いずれも持つことができます。名前が呼び出しの請求額を変えることはなく、応答のそれ以外の内容は保存しません。これはレコードのメタデータです。呼び出しの identity と journal のダイジェストの外にあり、アーカイブ形式から復元される journal の outcome には含まれません。呼び出しとともに保存されたレコードがこれを保持するので、再起動やクラッシュの後に復元されたレコードや、フォークが source から引き継いだレコードは、保存されたときの値を持ちます。名前のないレコードは従来どおりのバイト列で、このメンバーができる前のビルドは、これを含む保存済みの結果や journal の行を拒否します。
@@ -516,7 +516,7 @@ OpenRouter の origin では、broker はリクエストを送信用に準備す
 - 余裕を持たせる。`monetary_microunits` は NeoGraph が予約し記録する額の上限です。cap を無視しうる upstream に対しては、プロバイダーが請求する額の上限ではないので、ホストが失ってもよい額より少なく付与します。
 
 価格はホストが供給するデータです。組み込みの SchemaProvider カタログには価格が一つもないので、ホストがモデルに価格を付けるカタログを持つポリシーを provider に渡すまで、予算付きの実行は価格の付くすべての呼び出しを拒否します。C++ では `sp::descriptor::load_policy(family, resources, catalogue)` または `DescriptorPolicy::with_catalogue` を使い、ホストのレイヤーは `sp::descriptor::merge_catalogues` で統合します。Python では `load_provider_policy(family_json, resource_json, model_catalogue_json)` が、渡されたカタログを組み込みカタログの上に重ねます。項目の `pricing` は、単位を単位あたりの10進 USD に対応づけます（SchemaProvider の USAGE、"Pricing by the catalogue"）：
-- `input`、`output`、`cache_read`、`cache_write`、`cache_write_1h`、`reasoning`、`output_image`、`request`。
+- `input`、`output`、`cache_read`、`cache_write`、`cache_write_1h`、`reasoning`、`output_image`、`input_image`、`request`。
 - `ceiling_input`、`ceiling_output`、`ceiling_request`：OpenRouter の route ceiling。モデルの endpoint のうち最も高い値で、broker が `provider.max_price` として固定します。
 - `<unit>/<tier>`：service tier の価格。`default`、`standard`、`standard_only` 以外の tier のリクエストは、その単位だけで価格が付きます。
 - `<unit>+<tokens>`：long-context の帯。キャッシュを含む入力トークンがその数を超えると、帯の単位が呼び出し全体に価格を付けます。

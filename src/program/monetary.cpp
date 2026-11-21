@@ -331,43 +331,6 @@ void refuse(MonetaryQuote& quote, const sp::pricing::WorstCase& bound, const sp:
     block(quote, code, "the SDK gives the request no cost bound (" + joined(stated) + ")");
 }
 
-// The input rates the SDK's bound holds input at: the dearest of the input-side rates a ModelPrice carries.
-std::optional<std::uint64_t> bound_input_rate(const sp::pricing::ModelPrice& price) {
-    std::optional<std::uint64_t> dearest;
-    for (const auto& rate : {price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio})
-        if (rate && (!dearest || *rate > *dearest)) dearest = rate;
-    return dearest;
-}
-
-bool listed_member(std::string_view unit) {
-    return std::any_of(std::begin(sp::descriptor::listed_members), std::end(sp::descriptor::listed_members),
-                       [&](const sp::descriptor::ListedMember& member) { return member.member == unit; });
-}
-
-// A row of `entry` that bills input tokens in `tier` and the input band of `input_tokens` (sp::pricing::listed_floor),
-// that no ModelPrice the bound reads carries (input_image), and that is above every input rate the bound holds input
-// at, or at a price that is not a fixed amount: the image input of a request would be billed above its hold. Nothing
-// when there is none. The SDK's own functions read every row; the listing members a route ceiling covers are not rates
-// of the image a request carries and are left out.
-std::optional<json> unread_image_input_row(const sp::descriptor::CatalogueEntry& entry, std::string_view tier,
-                                           std::uint64_t input_tokens) {
-    const auto held_at = bound_input_rate(sp::pricing::dearest_price_of(entry, tier, input_tokens));
-    for (const auto& row : entry.pricing) {
-        if (listed_member(row.first)) continue;
-        auto alone    = entry;
-        alone.pricing = {row};
-        const auto listed = sp::pricing::listed_floor(alone, sp::pricing::TokenSide::Input, tier, input_tokens);
-        if (!listed.rate && !listed.unknown) continue;
-        if (bound_input_rate(sp::pricing::dearest_price_of(alone, tier, input_tokens))) continue;
-        if (listed.rate && held_at && *listed.rate <= *held_at) continue;
-        return json{{"entry", entry.id},
-                    {"unit", row.first},
-                    {"rate", row.second},
-                    {"input_rate", held_at ? json(sp::pricing::decimal_text(*held_at)) : json(nullptr)}};
-    }
-    return std::nullopt;
-}
-
 }  // namespace
 
 MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
@@ -421,20 +384,6 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
     }
     // A bound always has a billed tier: the SDK refuses a request whose extensions name none.
     quote.billed_tier = sp::pricing::billed_tier(request, quote.service_tier).tier;
-    // The SDK's bound at the listed rates holds an image the request carries at its input rates, and never reads the
-    // entry's input_image rate: an entry that lists it above them would bill the image above the hold. At the route
-    // ceiling every input token is held at ceiling_input, which the SDK refuses below a listed input_image rate.
-    if (request.image_input && !bound.route_ceiling) {
-        if (auto row = unread_image_input_row(*entry, quote.billed_tier, bound.invocation_input_tokens)) {
-            quote.witness["unmodeled"]   = "image input";
-            quote.witness["image_input"] = *row;
-            block(quote, "P_MONEY_UNMODELED",
-                  "the request carries image input, which entry '" + entry->id + "' prices at " +
-                      row->at("unit").get<std::string>() + " " + row->at("rate").get<std::string>() +
-                      " USD per token, above every input rate the SDK's cost bound holds input at");
-            return quote;
-        }
-    }
     quote.hold               = ceil_microunits(bound.total->nano_usd);
     quote.hold_basis         = bound.route_ceiling ? "route_ceiling" : "list_rates";
     quote.pin                = bound.pin;
@@ -631,7 +580,8 @@ std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       qu
     };
     record.conservative = quote.tool_fees_nano_usd != 0 || assumed("cache_read at input") ||
                           assumed("cache_write at cache_write_1h") || assumed("output at output_image") ||
-                          assumed("route ceiling");
+                          assumed("route ceiling") || assumed("input at input_image") ||
+                          assumed("cache_read at input_image") || assumed("cache_write at input_image");
     record.may_undercount = assumed("cache_write at input") || assumed("cache_write_1h at cache_write");
     if (estimate.entry != quote.pricing.value("entry", std::string())) {
         // The served model's entry priced the call.

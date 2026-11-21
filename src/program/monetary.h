@@ -24,10 +24,9 @@
  *     models, its server tools at their use caps, what it carries (an image)
  *     and, on an OpenRouter origin, the route ceiling, rounded up once to
  *     whole microunits. Every reason the SDK gives for no bound refuses the
- *     call with a P_MONEY_* code. So does a request that carries image input
- *     (RequestFacts::image_input) priced at the listed rates of an entry
- *     whose input_image rate, which the SDK's bound does not read, is above
- *     every input rate the bound holds input at (P_MONEY_UNMODELED). On an
+ *     call with a P_MONEY_* code. A request that may carry image input
+ *     (RequestFacts::image_input) is held at the dearest input rate of its
+ *     entry, input_image included. On an
  *     OpenRouter origin the request is pinned before it is prepared to be
  *     sent: its provider.max_price becomes the route ceiling, or the host's
  *     own cap where that is lower, so the request that is digested, journaled
@@ -40,7 +39,9 @@
  *     (sp::pricing::estimate) from the snapshot the hold was priced with,
  *     under the tier the hold was bounded at (the request facts' billed tier,
  *     which the record keeps as billed_tier), plus the reserved server-tool
- *     fees. An unknown outcome, resent transport
+ *     fees. A usage that does not count its image tokens, of a request that
+ *     may have carried an image, bills its input at the dearer of input and
+ *     input_image (the assumption "input at input_image"). An unknown outcome, resent transport
  *     attempts, or partial or inconsistent usage keep the hold as the charge.
  *     A failure that proves the provider accepted nothing (no request was
  *     sent, or a completed HTTP 4xx answer declined it) releases it.
