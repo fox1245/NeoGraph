@@ -1121,7 +1121,7 @@ TEST(MonetaryRecord, ABilledTierIsInTheEncodedRecordOnlyWhenTheCallBilledUnderOn
 
     auto fast           = old_record;
     fast["billed_tier"] = "fast";
-    fast["microunits"]  = 920;
+    fast["microunits"]  = std::uint64_t{920};
     const auto decoded  = program::detail::decode_monetary_record(fast);
     EXPECT_EQ(billed_tier_of(decoded), "fast");
     EXPECT_EQ(program::detail::encode_monetary_record(decoded).dump(), fast.dump());
