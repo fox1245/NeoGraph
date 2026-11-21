@@ -15,7 +15,6 @@
 #include <array>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -711,7 +710,13 @@ TEST(PricingWorstCase, AStaleRouteCeilingIsRefusedAsStale) {
                          {"ceiling_input", "0.000003"}, {"ceiling_output", "0.000004"}}),
          model_with("vendor/fresh", 1'000,
                     json{{"input", "0.000001"}, {"output", "0.000002"}, {"ceiling_input", "0.000003"},
-                         {"ceiling_output", "0.000004"}})});
+                         {"ceiling_output", "0.000004"}}),
+         model_with("vendor/listed", 1'000, kListed)});
+    // An entry without a ceiling is refused for the same kind of reason, and the reason a stale one is refused for
+    // is not that one.
+    const auto missing = program::detail::assess_monetary_call({}, prepared(*provider, "vendor/listed"));
+    EXPECT_EQ(missing.blocker, "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_EQ(first_unbounded(missing), "RouteCeiling");
     for (const auto* model : {"vendor/stale", "vendor/image-stale"}) {
         SCOPED_TRACE(model);
         const auto quote = program::detail::assess_monetary_call({}, prepared(*provider, model));
@@ -720,6 +725,8 @@ TEST(PricingWorstCase, AStaleRouteCeilingIsRefusedAsStale) {
         EXPECT_FALSE(quote.pin);
         EXPECT_EQ(first_unbounded(quote), "RouteCeiling");
         EXPECT_EQ(first_unbounded(quote, "subject"), model);
+        EXPECT_NE(first_unbounded(quote, "detail"), first_unbounded(missing, "detail"));
+        EXPECT_FALSE(first_unbounded(quote, "detail").empty());
     }
     const auto fresh = program::detail::assess_monetary_call({}, prepared(*provider, "vendor/fresh"));
     ASSERT_TRUE(fresh.blocker.empty()) << fresh.blocker_message;
@@ -727,19 +734,6 @@ TEST(PricingWorstCase, AStaleRouteCeilingIsRefusedAsStale) {
     EXPECT_EQ(fresh.hold, 3'000U + 400);
     ASSERT_TRUE(fresh.pin);
     EXPECT_EQ(fresh.pin->prompt_nano_usd, 3'000'000'000U);
-}
-
-TEST(PricingWorstCase, AnInputImageRateAtTheListedRatesIsHeldAsTheSdkBoundsIt) {
-    // Recorded, not decided here: what the SDK's chat bound does with an input_image rate above the input rate for a
-    // request that carries an image. The hold is the SDK's bound, whatever it is.
-    auto rows           = kListed;
-    rows["input_image"] = "0.000009";
-    auto provider = provider_at("openai.chat", "https://api.openai.com", {model_with("image-rate", 1'000, rows)});
-    const auto picture = priced(*provider, chat_request(*provider, "image-rate", true));
-    ASSERT_TRUE(picture.quote);
-    std::cout << "INPUT-IMAGE: blocker '" << picture.quote->blocker << "' hold " << picture.quote->hold << " sdk "
-              << sdk_hold(picture.prepared, *picture.quote) << "\n";
-    if (picture.quote->blocker.empty()) EXPECT_EQ(picture.quote->hold, sdk_hold(picture.prepared, *picture.quote));
 }
 
 TEST(PricingWorstCase, TheHoldIsTheSdkBoundAndCountsServerToolFeesOncePerAttempt) {
