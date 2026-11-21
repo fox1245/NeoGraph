@@ -298,7 +298,11 @@ void refuse(MonetaryQuote& quote, const sp::pricing::WorstCase& bound, const sp:
         block(quote, "P_MONEY_NO_UPPER_BOUND", "the SDK gives the request no cost bound");
         return;
     }
-    const auto& reason = bound.unbounded.front();
+    // A request without a cap on a server tool states no invocation limit either: the refusal names the cause, the
+    // first reason of another kind, when there is one.
+    const auto cause = std::find_if(bound.unbounded.begin(), bound.unbounded.end(),
+                                    [](const auto& item) { return item.by != UnboundedBy::Invocations; });
+    const auto& reason = cause != bound.unbounded.end() ? *cause : bound.unbounded.front();
     const auto  code   = refusal_code(reason.by);
     if (reason.by == UnboundedBy::ModelPrice) {
         const auto* entry = quote.catalogue->find(quote.family, quote.origin, reason.subject).entry;
