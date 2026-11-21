@@ -9,7 +9,13 @@ import neograph_engine as ng
 import neograph_engine.llm as nglm
 
 
-def _policy(peer, *, routed=True):
+TEMPERATURE_PROHIBITED = "request.choice.temperature_is_prohibited_for_the_admitted"
+
+
+def _policy(peer, *, routed=True, forbid_temperature=()):
+    """The policy of the fixture peer. ``forbid_temperature`` lists (family, model) pairs whose catalogue entry,
+    scoped to the peer's origin and spelled exactly as the request spells the model, prohibits ``temperature``:
+    temperature facts come from the model catalogue since SchemaProvider 0.4.2."""
     source = json.loads(ng.provider_policy_json())
     for family in source["families"]:
         if family["family"] in ("openai.chat", "anthropic.messages"):
@@ -25,7 +31,12 @@ def _policy(peer, *, routed=True):
                 family.pop("openrouter_plugins", None)
                 family.pop("openrouter_server_tools", None)
                 family.pop("cache", None)
-    return ng.load_provider_policy(json.dumps(source), ng.provider_codec_defaults_json())
+    catalogue = None
+    if forbid_temperature:
+        catalogue = json.dumps({"version": 1, "models": [
+            {"id": model, "families": [family], "origins": [peer.base_url], "temperature": False}
+            for family, model in forbid_temperature]})
+    return ng.load_provider_policy(json.dumps(source), ng.provider_codec_defaults_json(), catalogue)
 
 
 def _controls(**fields):
@@ -153,12 +164,14 @@ def _success(provider, request):
 
 
 def _rejected(peer, provider, controls, *, model="fixture-model", tools=None,
-              messages=None, kind=ng.ProviderErrorKind.InvalidRequest):
+              messages=None, kind=ng.ProviderErrorKind.InvalidRequest, reason=None):
     before = len(peer.requests)
     outcome = provider.invoke(_request(provider, controls, model=model,
                                        tools=tools, messages=messages))
     assert outcome.completion is None
     assert outcome.failure.error.kind == kind
+    if reason is not None:
+        assert outcome.failure.error.reason == reason
     assert len(peer.requests) == before
 
 
@@ -281,7 +294,6 @@ def test_openrouter_max_price_without_amounts_or_above_2_53_rejects_before_io(ty
     {"chat_reasoning": {"effort": "low"}, "reasoning_effort": "low"},
     {"models": ["same", "same"]},
     {"models": [""]},
-    {"models": ["OpenAI/GPT-5-nano"], "temperature": 0.5},
 ])
 def test_chat_control_conflicts_reject_before_peer_io(typed_peer, fields):
     provider = typed_peer.provider("openai.chat", policy=_policy(typed_peer))
@@ -290,6 +302,21 @@ def test_chat_control_conflicts_reject_before_peer_io(typed_peer, fields):
         value = fields["chat_reasoning"]
         fields["chat_reasoning"] = _reasoning(**(value if isinstance(value, dict) else {}))
     _rejected(typed_peer, provider, _controls(max_output_tokens=512, **fields))
+
+
+def test_a_fallback_model_whose_catalogue_entry_prohibits_temperature_rejects_before_peer_io(typed_peer):
+    fallback = "OpenAI/GPT-5-nano"
+    controls = _controls(max_output_tokens=512, models=[fallback], temperature=0.5)
+    provider = typed_peer.provider(
+        "openai.chat", policy=_policy(typed_peer, forbid_temperature=[("openai.chat", fallback)]))
+    _rejected(typed_peer, provider, controls, reason=TEMPERATURE_PROHIBITED)
+    # The same request under a catalogue with no such entry is sent: the provider answers it.
+    typed_peer.responder = _chat_response
+    plain = typed_peer.provider("openai.chat", policy=_policy(typed_peer))
+    _success(plain, _request(plain, controls))
+    [sent] = typed_peer.requests
+    assert sent["body"]["temperature"] == 0.5
+    assert sent["body"]["models"] == [fallback]
 
 
 @pytest.mark.parametrize("family,fields", [
@@ -419,11 +446,12 @@ def test_messages_tool_choice_conflicts_before_io(typed_peer, mode, name, parall
 ])
 def test_model_temperature_prohibition_is_closed_before_io(typed_peer, family, model):
     typed_peer.responder = _chat_response if family == "openai.chat" else _messages_response
-    provider = typed_peer.provider(family, policy=_policy(typed_peer))
+    provider = typed_peer.provider(
+        family, policy=_policy(typed_peer, forbid_temperature=[(family, model)]))
     controls = _controls(temperature=0.7)
     if family == "anthropic.messages":
         controls.thinking_mode = ng.MessagesThinkingMode.Adaptive
-    _rejected(typed_peer, provider, controls, model=model)
+    _rejected(typed_peer, provider, controls, model=model, reason=TEMPERATURE_PROHIBITED)
     controls.temperature = None
     _success(provider, _request(provider, controls, model=model))
     assert "temperature" not in typed_peer.requests[0]["body"]

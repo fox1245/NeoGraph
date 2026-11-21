@@ -257,10 +257,12 @@ def test_invalid_generation_controls_are_not_sent(typed_peer, invalid):
 
 
 def test_admitted_model_temperature_prohibition_is_enforced_without_io(typed_peer):
-    policy = json.loads(ng.provider_policy_json())
-    family = next(item for item in policy["families"] if item["family"] == "google.generate")
-    family["temperature_forbidden_model_prefixes"] = ["fixture-"]
-    admitted = ng.load_provider_policy(json.dumps(policy), ng.provider_codec_defaults_json())
+    # Temperature facts come from the model catalogue since SchemaProvider 0.4.2: an entry scoped to the peer's
+    # origin, spelled as the request spells the model.
+    catalogue = {"version": 1, "models": [{"id": MODEL, "families": ["google.generate"],
+                                           "origins": [typed_peer.base_url], "temperature": False}]}
+    admitted = ng.load_provider_policy(ng.provider_policy_json(), ng.provider_codec_defaults_json(),
+                                       json.dumps(catalogue))
     provider = _provider(typed_peer, admitted)
     controls = _controls()
     _denied(typed_peer, provider, _request(provider, controls=controls), ng.ProviderErrorKind.InvalidRequest)
