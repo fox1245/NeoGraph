@@ -741,6 +741,13 @@ target_link_libraries(neograph_runtime_context_tests PRIVATE
 )
 neograph_discover_tests(neograph_runtime_context_tests)
 
+# A blocking bridge whose coroutine is destroyed without completing (an initiation that throws, an operation that
+# drops its handler). A bridge that waited for the completion would never return, so these tests have a bound of
+# their own: each takes milliseconds, and the bound ends one that hangs.
+add_executable(neograph_run_sync_initiation_tests test_run_sync_initiation.cpp)
+target_link_libraries(neograph_run_sync_initiation_tests PRIVATE neograph::core GTest::gtest_main)
+neograph_discover_tests(neograph_run_sync_initiation_tests PROPERTIES TIMEOUT 30 LABELS "core;async")
+
 # Hook planning is Core-only and intentionally does not depend on providers,
 # model tool calls, or optional transport libraries.
 add_executable(neograph_hook_tests
