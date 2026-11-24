@@ -1,10 +1,12 @@
 // An object with threads, owned by one process of this program.
 //
-// The binding keeps objects that own threads (the runtime that drives `run_async`, the pools that run Python tool and
-// node bodies). A child made by fork inherits a copy of such an object and none of its threads. The copy is of no use
-// to the child, and touching it is harmful: joining a thread that is not the child's own, waiting for work that only
-// that thread can finish, or taking a lock that a thread of the parent held at the fork. Destroying it does all of
-// these (a thread object that is still joinable ends the process in its destructor).
+// The library and the Python binding keep objects that own threads, one for the whole process (the pools that run
+// blocking checkpoint calls, blocking tools and timed node attempts, the pool that starts database connections; in the
+// binding the runtime that drives `run_async` and the pools that run Python tool and node bodies). A child made by
+// fork inherits a copy of such an object and none of its threads. The copy is of no use to the child, and touching it
+// is harmful: joining a thread that is not the child's own, waiting for work that only that thread can finish, or
+// taking a lock that a thread of the parent held at the fork. Destroying it does all of these (a thread object that
+// is still joinable ends the process in its destructor).
 //
 // ProcessOwned<T> holds the one T of the process that created it:
 //  * get() returns that T and creates it on first use. In a child made by fork the T the parent created is another
@@ -14,27 +16,31 @@
 //  * Destroying the holder (static destruction at exit) destroys the T of this process as before and releases a
 //    parent's without destroying it.
 //
-// The process is told from its parent by the generation of src/core/process_generation.h: a fork handler changes it in
+// The process is told from its parent by the generation of process_generation.h: a fork handler changes it in
 // every child, and reading it is one atomic load. The slot records the generation when it is created, so the
 // handler is registered before the first T exists. A platform without fork never changes it.
 //
-// Nothing here takes a lock: a slot is installed with one compare-and-exchange, and a thread that loses the race
-// destroys the T it made (it is its own and has not been shared).
+// Nothing here takes a lock, and the path of a process that already has its T makes no system call: the check is one
+// relaxed atomic load of the generation, and a slot is installed with one compare-and-exchange. A thread that loses the race destroys the T it made (it is
+// its own and has not been shared).
+//
+// A holder that must outlive static destruction (a pool that the process never stops) is itself allocated and never
+// freed: `static auto* holder = new ProcessOwned<T>();`.
 
 #pragma once
 
-#include "core/process_generation.h"
+#include "process_generation.h"
 
 #include <atomic>
 #include <memory>
 #include <utility>
 
-namespace neograph::pybind {
+namespace neograph::detail {
 
 template <typename T>
 class ProcessOwned {
 public:
-    ProcessOwned() = default;
+    constexpr ProcessOwned() noexcept = default;
     ProcessOwned(const ProcessOwned&) = delete;
     ProcessOwned& operator=(const ProcessOwned&) = delete;
 
@@ -72,11 +78,11 @@ private:
         explicit Slot(Make&& make) : value(std::forward<Make>(make)()) {}
 
         // First member: the generation is recorded (and the fork handler registered) before the T exists.
-        neograph::detail::OpenedInProcess opened;
-        std::unique_ptr<T>      value;
+        OpenedInProcess    opened;
+        std::unique_ptr<T> value;
     };
 
     std::atomic<Slot*> slot_{nullptr};
 };
 
-}  // namespace neograph::pybind
+}  // namespace neograph::detail

@@ -91,7 +91,7 @@ bool process_forked_since_import() noexcept;
 /// GIL released.
 ///
 /// In a child made by fork it stops only the threads the child started itself
-/// (process_owned.h) and does not wait for the node attempts: the count of
+/// (core/process_owned.h) and does not wait for the node attempts: the count of
 /// running attempts belongs to the whole process, so the child cannot tell its
 /// own attempts from the ones its parent's threads were running at the fork,
 /// which no thread of the child can finish, and the lock that guards the count
