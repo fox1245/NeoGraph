@@ -5,10 +5,15 @@
 #pragma once
 
 #include <neograph/research/evidence_ledger.h>
+#include <neograph/store_opened_in_another_process.h>
 
 #include <chrono>
 #include <memory>
 #include <string>
+
+#ifdef NEOGRAPH_TESTING
+struct sqlite3;
+#endif
 
 namespace neograph::research {
 
@@ -16,6 +21,10 @@ namespace neograph::research {
  * SQLite-backed ledger with `BEGIN IMMEDIATE` lease/publication transitions.
  * Multiple processes may share one database; SQLite serializes writers, while
  * the task generation and lease id prevent stale workers from publishing.
+ *
+ * A child made by fork opens a ledger of its own: the copy it inherited refuses
+ * every operation with StoreOpenedInAnotherProcess, and destroying the copy
+ * leaves the parent's connection alone.
  */
 class NEOGRAPH_API SqliteEvidenceLedger final : public EvidenceLedger {
 public:
@@ -54,6 +63,11 @@ public:
                                                     std::uint64_t now_unix_ms) const override;
     [[nodiscard]] ClaimResolution resolve_claim(std::string_view owner_scope,
                                                 std::string_view claim_id) const override;
+
+#ifdef NEOGRAPH_TESTING
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
+#endif
 
 private:
     struct Impl;

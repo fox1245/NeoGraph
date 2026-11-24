@@ -3,15 +3,27 @@
 #include <neograph/context_store.h>
 #include <neograph/controlled_provider.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/store_opened_in_another_process.h>
 #include <neograph/tool_effect_broker.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
+#ifdef NEOGRAPH_TESTING
+struct sqlite3;
+#endif
+
 namespace neograph {
 
-/** Optional SQLite implementations of the runtime durability contracts. */
+/**
+ * Optional SQLite implementations of the runtime durability contracts.
+ *
+ * A child made by fork opens a store of its own: the copy of a store it
+ * inherited refuses every operation with StoreOpenedInAnotherProcess, and
+ * destroying the copy leaves the parent's connection alone. This holds for
+ * each store below.
+ */
 class NEOGRAPH_API SQLiteContextStore final : public DurableContextStore {
 public:
     explicit SQLiteContextStore(std::string database_path,
@@ -31,6 +43,10 @@ public:
         const ContextHistoryRange&) const override;
     ContextArtifactPutResult put_artifact(std::string_view, const ContextArtifact&) override;
     std::optional<ContextArtifact> get_artifact(std::string_view, std::string_view) const override;
+#ifdef NEOGRAPH_TESTING
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
+#endif
 private: struct Impl; std::unique_ptr<Impl> impl_;
 };
 
@@ -50,6 +66,10 @@ public:
     std::vector<HookOutboxEntry> pending() const override;
     std::vector<HookOutboxEntry> reconciliation_required() const override;
     std::optional<HookOutboxEntry> get(std::string_view) const override;
+#ifdef NEOGRAPH_TESTING
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
+#endif
 private: struct Impl; std::unique_ptr<Impl> impl_;
 };
 
@@ -73,6 +93,10 @@ public:
     std::optional<ProviderDispatchOutcomeReceipt> outcome(
         std::string_view owner_scope,
         std::string_view dispatch_id) const override;
+#ifdef NEOGRAPH_TESTING
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
+#endif
 private: struct Impl; std::unique_ptr<Impl> impl_;
 };
 
@@ -83,6 +107,10 @@ private: struct Impl; std::unique_ptr<Impl> impl_;
  * The host must validate grant authority before installing the broker.
  * Tool pointers are non-owning: the owning Agent or Core engine must keep each
  * exact instance alive until every in-flight broker call has completed.
+ *
+ * A child made by fork opens a broker of its own: in the copy it inherited,
+ * execute() throws StoreOpenedInAnotherProcess, and destroying the copy leaves
+ * the parent's connection alone.
  */
 struct SQLiteToolExecutableBinding {
     Tool* tool = nullptr;
@@ -99,6 +127,10 @@ public:
     asio::awaitable<ToolExecutionResult> execute(
         ToolEffectIdentity identity, Tool& tool, json arguments,
         ToolExecutionContext context) override;
+#ifdef NEOGRAPH_TESTING
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
+#endif
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

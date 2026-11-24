@@ -649,6 +649,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/evolution.cpp
     src/core/harness_bench.cpp
     src/core/tenant.cpp
+    src/core/process_generation.cpp
     src/observability/openinference.cpp
 )
 add_library(neograph_core ${NEOGRAPH_CORE_SOURCES})
@@ -2516,6 +2517,15 @@ if(NEOGRAPH_BUILD_TESTS)
     set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
+
+    if(TARGET neograph_program)
+        target_compile_definitions(neograph_program PUBLIC NEOGRAPH_PROGRAM_TESTING)
+    endif()
+
+    # The SQLite stores' test seams (a store's connection, for the fork tests).
+    if(TARGET neograph_sqlite)
+        target_compile_definitions(neograph_sqlite PRIVATE NEOGRAPH_TESTING)
+    endif()
 
     if(NEOGRAPH_BUILD_A2A)
         target_compile_definitions(neograph_a2a PRIVATE NEOGRAPH_A2A_TESTING)

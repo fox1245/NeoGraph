@@ -1,5 +1,7 @@
 #include <neograph/program/sqlite_core_tool_grant_store.h>
 
+#include "../core/process_generation.h"
+
 #include <sqlite3.h>
 
 #include <limits>
@@ -132,18 +134,32 @@ struct SQLiteProgramCoreToolGrantStore::Impl {
         }
     }
     ~Impl() { sqlite3_close(db); }
+    // Every operation passes here on its way to the connection: the copy that a child made by fork inherited refuses
+    // it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() const {
+        opened.check("SQLiteProgramCoreToolGrantStore");
+        return std::lock_guard<std::mutex>(mutex);
+    }
+    // First, so that it is recorded before the connection is opened.
+    neograph::detail::OpenedInProcess opened;
     sqlite3* db = nullptr;
     mutable std::mutex mutex;
 };
 
 SQLiteProgramCoreToolGrantStore::SQLiteProgramCoreToolGrantStore(std::string database_path)
     : impl_(std::make_unique<Impl>(database_path)) {}
-SQLiteProgramCoreToolGrantStore::~SQLiteProgramCoreToolGrantStore() = default;
+SQLiteProgramCoreToolGrantStore::~SQLiteProgramCoreToolGrantStore() {
+    neograph::detail::release_if_inherited(impl_);
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTING)
+sqlite3* SQLiteProgramCoreToolGrantStore::connection_for_testing() const noexcept { return impl_->db; }
+#endif
 
 ProgramCoreToolGrantAdmission SQLiteProgramCoreToolGrantStore::admit_sync(
     const ProgramCoreToolGrantRecord& record) {
     validate(record);
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     auto* db = impl_->db;
     Transaction transaction(db);
     Statement same_grant(db, "SELECT program_version_id,run_id,operation_id,"
@@ -194,7 +210,7 @@ ProgramCoreToolGrantAdmission SQLiteProgramCoreToolGrantStore::admit_sync(
 
 std::optional<ProgramCoreToolGrantRecord> SQLiteProgramCoreToolGrantStore::load_sync(
     const ProgramCoreToolGrantContext& context) const {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement statement(impl_->db, "SELECT grant_id FROM program_core_tool_grants "
         "WHERE owner_scope=?1 AND program_version_id=?2 AND run_id=?3 "
         "AND operation_id=?4 AND attempt=?5 AND binding_fingerprint=?6 AND revoked=0");
@@ -210,7 +226,7 @@ std::optional<ProgramCoreToolGrantRecord> SQLiteProgramCoreToolGrantStore::load_
 
 bool SQLiteProgramCoreToolGrantStore::revoke_sync(
     const ProgramCoreToolGrantContext& context) {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
     Statement lookup(impl_->db, "SELECT grant_id FROM program_core_tool_grants "
         "WHERE owner_scope=?1 AND program_version_id=?2 AND run_id=?3 "
