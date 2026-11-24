@@ -29,7 +29,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <vector>
+#include <optional>
+#include <memory>
 #include <future>
+#include <sstream>
 #include <string>
 #include <cerrno>
 #include <thread>
@@ -1266,3 +1270,193 @@ TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
     unset("NG_MCP_INHERITED");
     unset("NG_MCP_OVERRIDDEN");
 }
+
+#ifndef _WIN32
+namespace {
+
+// A stdio server that answers the handshake, never answers a tool call, and
+// ends only when it is killed: end of input and SIGTERM are recorded and
+// otherwise ignored, so the whole shutdown ladder runs. The record file gets
+// "pid <n>" at start, then "call", "cancelled", "eof" and "sigterm" as they happen.
+const char* kLadderScript =
+    "import json, os, signal, sys\n"
+    "record = sys.argv[1]\n"
+    "def note(text):\n"
+    "    with open(record, 'a') as handle:\n"
+    "        handle.write(text + '\\n')\n"
+    "signal.signal(signal.SIGTERM, lambda _signum, _frame: note('sigterm'))\n"
+    "note('pid %d' % os.getpid())\n"
+    "def send(message):\n"
+    "    sys.stdout.write(json.dumps(message) + '\\n')\n"
+    "    sys.stdout.flush()\n"
+    "for line in sys.stdin:\n"
+    "    message = json.loads(line)\n"
+    "    method = message.get('method')\n"
+    "    if method == 'notifications/cancelled':\n"
+    "        note('cancelled')\n"
+    "    elif method == 'tools/call':\n"
+    "        note('call')\n"
+    "    elif method == 'initialize':\n"
+    "        send({'jsonrpc': '2.0', 'id': message['id'], 'result': {\n"
+    "            'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}},\n"
+    "            'serverInfo': {'name': 'ladder', 'version': '1'}}})\n"
+    "note('eof')\n"
+    "while True:\n"
+    "    signal.pause()\n";
+
+std::vector<std::string> record_lines(const std::filesystem::path& path) {
+    std::vector<std::string> lines;
+    std::istringstream in(read_record(path));
+    for (std::string line; std::getline(in, line);) lines.push_back(line);
+    return lines;
+}
+
+int recorded_pid(const std::vector<std::string>& lines) {
+    for (const auto& line : lines) {
+        if (line.rfind("pid ", 0) == 0) return std::stoi(line.substr(4));
+    }
+    return -1;
+}
+
+bool process_is_gone(int pid) { return ::kill(pid, 0) == -1 && errno == ESRCH; }
+
+}  // namespace
+
+// Ending a session closes the server's input first, waits for it to exit,
+// then sends SIGTERM and finally SIGKILL: a server that ignores both the end
+// of input and SIGTERM still ends before the destructor returns.
+TEST(MCPStdioAsync, ShutdownEscalatesFromEndOfInputToSigtermToSigkill) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    const auto started = std::chrono::steady_clock::now();
+    {
+        mcp::StdioClientConfig config;
+        config.argv = {python_cmd(), "-c", kLadderScript, record.string()};
+        mcp::MCPClient client(std::move(config));
+        ASSERT_TRUE(client.initialize());
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(30));
+    const auto lines = record_lines(record);
+    ASSERT_GE(lines.size(), 3u) << read_record(record);
+    EXPECT_EQ(lines[1], "eof");
+    EXPECT_EQ(lines[2], "sigterm");
+    EXPECT_EQ(lines.size(), 3u) << read_record(record);
+    const int pid = recorded_pid(lines);
+    ASSERT_GT(pid, 0);
+    EXPECT_TRUE(process_is_gone(pid)) << "the server outlived its client";
+}
+
+// A cancelled call ends the server that ignores every gentle signal, through
+// the same ladder without the long waits; the session takes no more requests.
+TEST(MCPStdioAsync, CancellationEndsAServerThatIgnoresEveryGentleSignal) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", kLadderScript, record.string()};
+    config.cancel_grace = std::chrono::milliseconds(100);
+    auto cancel = std::make_shared<graph::CancelToken>();
+    {
+        mcp::MCPClient client(std::move(config));
+        ASSERT_TRUE(client.initialize());
+        auto pending = std::async(std::launch::async, [&]() -> std::optional<mcp::MCPFailure> {
+            try {
+                async::run_sync(client.rpc_call_async("tools/call", json::object(),
+                    std::chrono::steady_clock::time_point::max(), cancel));
+            } catch (const mcp::MCPTransportError& error) { return error.failure(); }
+            return std::nullopt;
+        });
+        ASSERT_TRUE(wait_for_record(record, "call", std::chrono::seconds(10)))
+            << "the server never received the call";
+        cancel->cancel();
+        EXPECT_EQ(pending.get(), mcp::MCPFailure::cancelled);
+        try {
+            client.call_tool("probe", json::object());
+            ADD_FAILURE() << "a cancelled hardened session took another request";
+        } catch (const mcp::MCPTransportError& error) {
+            EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+        }
+    }
+    const auto lines = record_lines(record);
+    const int  pid   = recorded_pid(lines);
+    ASSERT_GT(pid, 0) << read_record(record);
+    EXPECT_TRUE(process_is_gone(pid)) << read_record(record);
+}
+
+// A hardened session ends for good after a request timeout: the server is
+// stopped, and a later request fails as a shut-down session.
+TEST(MCPStdioAsync, AHardenedSessionEndsForGoodAfterARequestTimeout) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", kLadderScript, record.string()};
+    config.request_timeout = std::chrono::milliseconds(200);
+    config.cancel_grace = std::chrono::milliseconds(100);
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize());
+    try {
+        client.call_tool_result("slow", json::object());
+        ADD_FAILURE() << "the unanswered call returned";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout);
+    }
+    try {
+        client.call_tool_result("again", json::object());
+        ADD_FAILURE() << "a timed-out hardened session took another request";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+    client.shutdown();
+    const int pid = recorded_pid(record_lines(record));
+    ASSERT_GT(pid, 0);
+    EXPECT_TRUE(process_is_gone(pid));
+}
+
+// A message line longer than max_frame_bytes ends the session with a
+// protocol failure; shorter ones pass.
+TEST(MCPStdioAsync, AFrameOverTheConfiguredLimitIsAProtocolFailure) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    const char* script =
+        "import json, sys\n"
+        "size = int(sys.argv[1])\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    if message.get('method') == 'initialize':\n"
+        "        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': {\n"
+        "            'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}},\n"
+        "            'serverInfo': {'name': 'x' * size, 'version': '1'}}}) + '\\n')\n"
+        "        sys.stdout.flush()\n";
+    for (const auto& [size, passes] : std::vector<std::pair<std::string, bool>>{
+             {"512", true}, {"65536", false}}) {
+        SCOPED_TRACE(size);
+        mcp::StdioClientConfig config;
+        config.argv = {python_cmd(), "-c", script, size};
+        config.max_frame_bytes = 4096;
+        config.request_timeout = std::chrono::milliseconds(3000);
+        mcp::MCPClient client(std::move(config));
+        if (passes) {
+            EXPECT_TRUE(client.initialize());
+        } else {
+            EXPECT_EQ(failure_of_initialize(client), mcp::MCPFailure::protocol);
+        }
+    }
+}
+
+// The argv constructor starts the server in this process's working directory
+// with this process's whole environment. A hardened StdioClientConfig names
+// its own working directory and can replace the environment.
+TEST(MCPStdioAsync, TheArgvConstructorInheritsTheWorkingDirectoryAndEnvironment) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    ::setenv("NG_MCP_LEGACY_INHERITED", "from-parent", 1);
+    mcp::MCPClient client(std::vector<std::string>{
+        python_cmd(), (fixture_path().parent_path() / "mcp_stdio_boundary.py").string(), "report"});
+    auto result = client.call_tool("probe", json::object());
+    ::unsetenv("NG_MCP_LEGACY_INHERITED");
+    EXPECT_EQ(result.at("environment").value("NG_MCP_LEGACY_INHERITED", ""), "from-parent");
+    EXPECT_TRUE(result.at("environment").contains("PATH"));
+    EXPECT_TRUE(std::filesystem::equivalent(result.at("cwd").get<std::string>(),
+                                            std::filesystem::current_path()));
+}
+#endif  // _WIN32
