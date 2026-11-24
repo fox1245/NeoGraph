@@ -887,6 +887,24 @@ if(NEOGRAPH_BUILD_SQLITE AND NOT WIN32)
     neograph_discover_tests(neograph_store_fork_tests PROPERTIES TIMEOUT 30 LABELS "sqlite;fork")
 endif()
 
+if(NOT WIN32)
+    # The pools and threads that the library keeps for the whole process, in a child made by fork (fork_child.h). A
+    # child that hangs is ended with its test by the bound below.
+    add_executable(neograph_pool_fork_tests test_process_pools_in_forked_child.cpp)
+    target_link_libraries(neograph_pool_fork_tests PRIVATE neograph::core GTest::gtest_main)
+    if(TARGET neograph_postgres)
+        # The connection pool's case ends a session of the test database: it holds the database's lock.
+        target_compile_definitions(neograph_pool_fork_tests PRIVATE NEOGRAPH_POOL_FORK_TESTS_HAVE_POSTGRES)
+        target_link_libraries(neograph_pool_fork_tests PRIVATE neograph::postgres PostgreSQL::PostgreSQL)
+        neograph_discover_tests(neograph_pool_fork_tests TEST_FILTER "PostgresConnectionPoolInForkedChild.*"
+            PROPERTIES TIMEOUT 30 RESOURCE_LOCK postgres_test_db LABELS "postgres;fork")
+        neograph_discover_tests(neograph_pool_fork_tests TEST_FILTER "-PostgresConnectionPoolInForkedChild.*"
+            PROPERTIES TIMEOUT 30 LABELS "core;fork")
+    else()
+        neograph_discover_tests(neograph_pool_fork_tests PROPERTIES TIMEOUT 30 LABELS "core;fork")
+    endif()
+endif()
+
 if(NEOGRAPH_BUILD_SQLITE)
     # Data written by a released version still opens, reads and resumes with
     # the current stores (#609). Each test copies the committed file first.

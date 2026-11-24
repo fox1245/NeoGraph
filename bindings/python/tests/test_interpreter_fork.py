@@ -59,11 +59,6 @@ PRELUDE = textwrap.dedent('''
         return os.getpid() != PARENT_PID
 
 
-    # Registered first of all, so it runs last: the child leaves once every exit hook has run, before the destructors of
-    # static objects run (see the test that sets the variable).
-    if os.environ.get("CHILD_LEAVES_AFTER_THE_EXIT_HOOKS"):
-        atexit.register(lambda: os._exit(CHILD_STATUS) if in_child() else None)
-
     # Registered before the module is imported, so it runs after the module's own exit hook, in whichever process
     # exits: the binding refuses new runs once its hook has stopped its runtime.
     def after_the_hook():
@@ -284,10 +279,10 @@ IN_FLIGHT_ATTEMPT = '''
 
 def test_the_exit_hook_of_a_child_made_while_a_node_attempt_runs_in_its_parent_does_not_wait_for_it():
     # The count of running attempts is inherited, and only the parent's thread can lower it: a hook that waited for the
-    # count to reach zero would wait for ever. The child leaves after the exit hooks have run (the variable): the
-    # destructors of static objects of the core library that run after them are another unit's (a node attempt that has
-    # a timeout runs on a pool of that library, whose destructor joins threads the child does not have).
-    lines = _lines(_run_script(IN_FLIGHT_ATTEMPT, CHILD_LEAVES_AFTER_THE_EXIT_HOOKS="1"))
+    # count to reach zero would wait for ever. The child then leaves the way a script does: the destructors of static
+    # objects of the core library run after the hooks, and the pool of timed node attempts that the parent used is not
+    # joined there, since the child has none of its threads.
+    lines = _lines(_run_script(IN_FLIGHT_ATTEMPT))
     assert lines == ["attempt running", "child after the hook: refused", f"child status {CHILD_STATUS}",
                      "attempt run True", "parent ran again"], lines
 

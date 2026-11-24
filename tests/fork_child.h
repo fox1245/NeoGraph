@@ -14,7 +14,9 @@
 #endif
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <ostream>
 #include <stdexcept>
 #include <system_error>
@@ -78,15 +80,30 @@ inline ForkChildEnd wait_for_child(pid_t child) {
 
 }  // namespace detail
 
+/// How a child made by run_in_forked_child() leaves once its body has returned.
+enum class ForkChildLeaves {
+    /// Through std::_Exit: no exit handler and no static destructor runs in the child.
+    Immediately,
+    /// Through std::exit, the way a program that forks and then returns from main() leaves: the exit handlers and the
+    /// destructors of static objects run in the child, among them those of objects that only the parent's threads
+    /// could stop. The parent's buffered output is flushed before the fork, so that the child does not write it again.
+    Normally,
+};
+
 /// Makes a child by fork and runs `body` (a callable returning an exit status) in it. The child never returns into
-/// the test runner: it leaves through std::_Exit with the status `body` returns, or kForkChildThrew when `body`
-/// throws, so neither the test framework nor a static destructor runs there. `body` reports through its status and
-/// does not use the framework's assertions.
+/// the test runner: it leaves with the status `body` returns, or kForkChildThrew when `body` throws, through
+/// std::_Exit by default, so neither the test framework nor a static destructor runs there (see ForkChildLeaves for
+/// the other way). `body` reports through its status and does not use the framework's assertions.
 ///
 /// The parent waits for the child with no bound of its own: a child that does not end is ended together with its
 /// test by the test's TIMEOUT property (on Linux the child is killed when the thread that made it ends).
 template <class Body>
-ForkChildEnd run_in_forked_child(Body&& body) {
+ForkChildEnd run_in_forked_child(Body&& body, ForkChildLeaves leaves = ForkChildLeaves::Immediately) {
+    if (leaves == ForkChildLeaves::Normally) {
+        std::cout.flush();
+        std::cerr.flush();
+        std::fflush(nullptr);
+    }
     const pid_t child = detail::fork_tied_to_parent();
     if (child == 0) {
         int status = kForkChildThrew;
@@ -94,6 +111,7 @@ ForkChildEnd run_in_forked_child(Body&& body) {
             status = std::forward<Body>(body)();
         } catch (...) {
         }
+        if (leaves == ForkChildLeaves::Normally) std::exit(status);
         std::_Exit(status);
     }
     return detail::wait_for_child(child);

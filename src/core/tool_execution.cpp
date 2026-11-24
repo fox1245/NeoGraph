@@ -4,6 +4,7 @@
 #include <neograph/tool.h>
 
 #include "host_timer.h"
+#include "process_owned.h"
 #include "loop_handoff.h"
 #include "pipe_write.h"
 #include "text_safety.h"
@@ -249,12 +250,15 @@ HostAdmissionRequest host_request_for(const ToolExecutionPolicy& policy,
 asio::thread_pool& blocking_tool_pool() {
     // This is intentionally one bounded shared pool, never one thread per tool
     // call. Resource leases bound the work admitted to it; the pool only keeps
-    // legacy synchronous implementations from pinning the graph event loop.
-    static asio::thread_pool pool([] {
+    // legacy synchronous implementations from pinning the graph event loop. A
+    // child made by fork has none of the parent's threads: it makes a pool of
+    // its own and leaves the parent's alone (process_owned.h).
+    static neograph::detail::ProcessOwned<asio::thread_pool> pool;
+    return pool.get([] {
         const auto hardware = std::thread::hardware_concurrency();
-        return std::max<std::size_t>(2, std::min<std::size_t>(hardware == 0 ? 4 : hardware, 16));
-    }());
-    return pool;
+        return std::make_unique<asio::thread_pool>(
+            std::max<std::size_t>(2, std::min<std::size_t>(hardware == 0 ? 4 : hardware, 16)));
+    });
 }
 
 } // namespace
