@@ -17,6 +17,7 @@
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
 #include <asio/post.hpp>
@@ -28,8 +29,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <exception>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 using namespace std::chrono_literals;
 using neograph::async::run_sync_pool;

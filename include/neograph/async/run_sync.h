@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/cancel.h>
 
 #include <asio/any_io_executor.hpp>
@@ -45,10 +46,21 @@
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 namespace neograph::async {
+
+/// Thrown by `run_sync` (and by the engine's blocking run, which uses the same bridge) when the coroutine it started
+/// was destroyed before it completed and no exception reached the bridge: an operation that the coroutine awaited
+/// destroyed its completion handler without calling it. An initiation that throws is reported with its own
+/// exception, not with this one.
+class NEOGRAPH_API OperationAbandoned : public std::runtime_error {
+public:
+    OperationAbandoned()
+        : std::runtime_error("neograph: the awaited operation was destroyed before it completed") {}
+};
 
 namespace detail {
 
@@ -243,13 +255,7 @@ public:
         started_ = true;
         try {
             asio::co_spawn(executor, std::move(body),
-                asio::bind_cancellation_slot(slot,
-                    [this](std::exception_ptr error) {
-                        completed_ = true;
-                        if (error && !operation_error_) {
-                            operation_error_ = std::move(error);
-                        }
-                    }));
+                asio::bind_cancellation_slot(slot, Completion(*this)));
         } catch (...) {
             started_ = false;
             remember(std::current_exception());
@@ -280,7 +286,8 @@ public:
                 io_->restart();
                 continue;
             }
-            if (!started_ || completed_) return handled;
+            // An abandoned coroutine is gone: nothing is left that could complete it.
+            if (!started_ || completed_ || abandoned_) return handled;
             // A handler may explicitly stop the private context. That is not
             // completion of the operation owned by this blocking bridge.
             io_->restart();
@@ -309,10 +316,46 @@ public:
         } while (drain() != 0);
         quiescence_.wait();
         io_.reset();
+        // The first failure that left the context comes first: after an initiation threw, that is its exception.
         if (error_) std::rethrow_exception(error_);
+        // Checked after the reset, which can destroy the coroutine too. Without it the caller would get neither a
+        // result nor an error.
+        if (abandoned_ && !operation_error_) throw OperationAbandoned();
     }
 
 private:
+    // The completion given to co_spawn. Asio calls it once, or destroys it without calling it when the coroutine is
+    // destroyed before it completes (an initiation that throws, an operation that drops its handler, the context
+    // destroyed with the coroutine in it); it notes which. Asio moves it, and a moved-from completion notes nothing.
+    // The run it writes to is alive wherever it is destroyed, always on the caller's thread: a frame that is
+    // abandoned is destroyed by a handler that ~awaitable_thread posts to the coroutine's executor, which only
+    // drain() and finish() run; the context's own destruction (finish(), ~SyncIoRun()) destroys what it still holds;
+    // and before the posted start has run (spawn), no completion exists. It holds one pointer and takes no lock and
+    // no atomic.
+    class Completion {
+    public:
+        explicit Completion(SyncIoRun& run) noexcept : run_(&run) {}
+        Completion(Completion&& other) noexcept : run_(std::exchange(other.run_, nullptr)) {}
+        Completion(const Completion&) = delete;
+        Completion& operator=(const Completion&) = delete;
+        Completion& operator=(Completion&&) = delete;
+        ~Completion() {
+            if (run_) run_->abandoned_ = true;
+        }
+
+        void operator()(std::exception_ptr error) {
+            SyncIoRun& run = *std::exchange(run_, nullptr);
+            run.completed_ = true;
+            if (error && !run.operation_error_) {
+                run.operation_error_ = std::move(error);
+            }
+        }
+
+    private:
+        SyncIoRun* run_;
+    };
+    static_assert(sizeof(Completion) == sizeof(SyncIoRun*));
+
     void remember(std::exception_ptr error) noexcept {
         if (error && !error_) error_ = std::move(error);
     }
@@ -325,6 +368,7 @@ private:
     std::exception_ptr& operation_error_;
     bool started_ = false;
     bool completed_ = false;
+    bool abandoned_ = false;
 };
 
 // Drive an engine operation with two cancellation scopes. The operation token
@@ -332,7 +376,9 @@ private:
 // child is reserved for the wrapper's co_spawn. Asio cancellation signals have
 // one mutable slot, so binding both layers to the same token lets a nested
 // consumer replace the wrapper handler and can leave its awaitable frame
-// clearing freed slot state during teardown.
+// clearing freed slot state during teardown. A coroutine destroyed before it
+// completes is reported as run_sync reports it: the initiation's exception, or
+// OperationAbandoned.
 template <typename T>
 T run_sync_operation(
     asio::awaitable<T> aw,
@@ -402,6 +448,14 @@ T run_sync_operation(
 /// Run @p aw to completion on a fresh single-threaded io_context
 /// and return its result. Any exception thrown inside the coroutine
 /// is rethrown on the caller's thread.
+///
+/// When the initiation of an operation that the coroutine awaits throws,
+/// Asio destroys the coroutine without resuming it, and the exception
+/// leaves the private context instead: the call then rethrows that
+/// exception, or the first failure of a handler that threw before it.
+/// When the coroutine is destroyed before it completes and no exception
+/// left the context (an operation destroyed its completion handler
+/// without calling it), the call throws OperationAbandoned.
 ///
 /// The awaitable should use `co_await asio::this_coro::executor` to
 /// obtain an executor for nested operations; that executor will be
@@ -560,6 +614,10 @@ inline void run_sync(asio::awaitable<void> aw,
 ///
 /// `n_threads` is clamped to at least 1. Pool construction spawns
 /// one std::thread per worker; cost is non-trivial for hot paths.
+///
+/// An exception that leaves a handler on a worker, as the exception of an
+/// initiation that throws inside @p aw does, ends the process: Asio's
+/// thread pool calls std::terminate for it.
 template <typename T>
 T run_sync_pool(asio::awaitable<T> aw, std::size_t n_threads) {
     asio::thread_pool pool(n_threads > 0 ? n_threads : 1);
