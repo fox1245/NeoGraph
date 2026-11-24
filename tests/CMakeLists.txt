@@ -699,9 +699,75 @@ include(GoogleTest)
 # gives up after 5 s by default. On a loaded CI runner (seen on the Windows
 # Visual Studio lane) listing a large binary can take longer, which fails the
 # build, so every test binary is discovered through this wrapper with a 120 s
-# limit. Extra arguments are passed through unchanged.
+# limit. Extra arguments are passed through unchanged, except LABELS.
+#
+# gtest_discover_tests writes the properties it is given as one flat list into a file that CTest reads, and
+# set_tests_properties reads that list as key and value pairs. A LABELS value with several labels ("a;b") therefore
+# lost its separator: only the first label was a label, the next word became a key without a value, and every pair
+# after it shifted (a TIMEOUT written after the labels was lost). So LABELS is not given to the discovery. Its value
+# (the one argument after LABELS in PROPERTIES, which may be a list such as "core;json") is set after the discovery,
+# on the tests it lists, by a small file that CTest reads after the discovered tests. Each discovery has its own list
+# variable and its own file, because one target can be discovered more than once (a TEST_FILTER pair, the second
+# discovery of a binary). Every other argument is passed through as written.
 function(neograph_discover_tests target)
-    gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120 ${ARGN})
+    set(_ng_args "")
+    set(_ng_labels "")
+    set(_ng_has_labels FALSE)
+    set(_ng_in_properties FALSE)
+    set(_ng_i 1)
+    while(_ng_i LESS ARGC)
+        set(_ng_arg "${ARGV${_ng_i}}")
+        if("${_ng_arg}" STREQUAL "PROPERTIES")
+            set(_ng_in_properties TRUE)
+            list(APPEND _ng_args "${_ng_arg}")
+        elseif(_ng_in_properties AND "${_ng_arg}" STREQUAL "LABELS")
+            math(EXPR _ng_i "${_ng_i} + 1")
+            if(_ng_i GREATER_EQUAL ARGC)
+                message(FATAL_ERROR "neograph_discover_tests(${target}): LABELS has no value")
+            endif()
+            set(_ng_labels "${ARGV${_ng_i}}")
+            set(_ng_has_labels TRUE)
+        else()
+            list(APPEND _ng_args "${_ng_arg}")
+        endif()
+        math(EXPR _ng_i "${_ng_i} + 1")
+    endwhile()
+
+    if(NOT _ng_has_labels)
+        gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120 ${ARGN})
+        return()
+    endif()
+    list(FIND _ng_args TEST_LIST _ng_has_list)
+    if(NOT _ng_has_list EQUAL -1)
+        message(FATAL_ERROR "neograph_discover_tests(${target}): TEST_LIST cannot be combined with LABELS")
+    endif()
+
+    # PROPERTIES with nothing after it is dropped.
+    list(LENGTH _ng_args _ng_n)
+    if(_ng_n GREATER 0)
+        math(EXPR _ng_last "${_ng_n} - 1")
+        list(GET _ng_args ${_ng_last} _ng_tail)
+        if(_ng_tail STREQUAL "PROPERTIES")
+            list(REMOVE_AT _ng_args ${_ng_last})
+        endif()
+    endif()
+
+    get_property(_ng_seq GLOBAL PROPERTY NEOGRAPH_TEST_LABELS_SEQ)
+    if(NOT _ng_seq)
+        set(_ng_seq 0)
+    endif()
+    math(EXPR _ng_seq "${_ng_seq} + 1")
+    set_property(GLOBAL PROPERTY NEOGRAPH_TEST_LABELS_SEQ ${_ng_seq})
+    set(_ng_list "neograph_discovered_${target}_${_ng_seq}")
+    set(_ng_file "${CMAKE_CURRENT_BINARY_DIR}/${target}_labels_${_ng_seq}.cmake")
+
+    gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120 TEST_LIST ${_ng_list} ${_ng_args})
+
+    file(WRITE "${_ng_file}"
+        "if(${_ng_list})\n"
+        "  set_tests_properties(\${${_ng_list}} PROPERTIES LABELS \"${_ng_labels}\")\n"
+        "endif()\n")
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${_ng_file}")
 endfunction()
 
 # A suite instantiated over tests/fixtures/checkpoint_backends.h also runs on
@@ -713,11 +779,11 @@ function(neograph_discover_backend_tests target labels)
         target_link_libraries(${target} PRIVATE neograph::postgres)
         target_compile_definitions(${target} PRIVATE NEOGRAPH_TESTS_HAVE_POSTGRES)
         neograph_discover_tests(${target} TEST_FILTER "*/Postgres*"
-            PROPERTIES RESOURCE_LOCK postgres_test_db LABELS ${labels})
+            PROPERTIES RESOURCE_LOCK postgres_test_db LABELS "${labels}")
         neograph_discover_tests(${target} TEST_FILTER "-*/Postgres*"
-            PROPERTIES LABELS ${labels})
+            PROPERTIES LABELS "${labels}")
     else()
-        neograph_discover_tests(${target} PROPERTIES LABELS ${labels})
+        neograph_discover_tests(${target} PROPERTIES LABELS "${labels}")
     endif()
 endfunction()
 
