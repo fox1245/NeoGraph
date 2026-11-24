@@ -2,9 +2,10 @@
 //
 // A tool that blocks a thread (execute_blocking_tool_async), a process (execute_process_tool_async) or a synchronous
 // checkpoint store runs on a pool of the process and hands its result back by posting to the executor of the run that
-// awaits it. When that executor belongs to a HostLoop, the host may destroy the loop while the work is still running,
-// and it cannot join the pool. Posting from the pool thread then touches an io_context that is gone, and so does
-// releasing a work guard or a strand it holds. Executors that are not run by a HostLoop do not use a LoopHandoff.
+// awaits it. Below, "the pool thread" is any of these finishers. When that
+// executor belongs to a HostLoop, the host may destroy the loop while the work is still running, and it cannot join
+// the pool. Posting from the pool thread then touches an io_context that is gone, and so does releasing a
+// work guard or a strand it holds. Executors that are not run by a HostLoop do not use a LoopHandoff.
 //
 // A LoopHandoff owns the continuation (`resume`, which owns the awaiting coroutine) and the executor it is posted to,
 // for the whole time the pool thread works:
@@ -15,9 +16,10 @@
 //   - A loop that is closed while the work is still running takes the continuation, and destroys it on the host's
 //     thread, before the io_context it ran on: the coroutine is destroyed as the coroutines that the loop holds are,
 //     and the result of the work is dropped when it arrives. finish() then only releases its reference to the loop
-//     (whose io_context and host executor reference are already gone). A handoff destroyed without finish() hands an
-//     untaken continuation back to the loop for the host thread to destroy and requests a turn if the loop is still
-//     open.
+//     (whose io_context and host executor reference are already gone), which may be the last one: what is left of the
+//     loop, which holds nothing of the host's, is then freed on the pool thread. A handoff destroyed without finish()
+//     hands an untaken continuation back to the loop for the host thread to destroy and requests a turn if the loop is
+//     still open.
 #pragma once
 
 #include <neograph/api.h>
@@ -71,8 +73,9 @@ public:
     /// Hands an unfinished continuation (the pool discarded the work) back to the loop for the host thread to destroy.
     NEOGRAPH_API ~LoopHandoff();
 
-    /// From the pool thread, once, after the result is stored where `resume` reads it. Posts the continuation if the
-    /// loop has not taken it over, and releases the handoff's reference to the loop. Touches nothing of the loop after
+    /// From the pool thread, once, after the result is stored where
+    /// `resume` reads it. Posts the continuation if the loop has not taken it over, and releases the handoff's
+    /// reference to the loop, which may be the last one once the loop is destroyed. Touches nothing of the loop after
     /// it returns.
     NEOGRAPH_API void finish() noexcept;
 
@@ -85,7 +88,9 @@ private:
 
     enum class State : unsigned char { Open, Posted, Taken };
 
-    // Everything below is the loop's gate to guard.
+    // The loop's gate guards `executor_`, `resume_` and `state_`. `core_` is set under the gate when the handoff opens
+    // (HostLoopCore::track) and is then touched only by the handoff's owner, which moves it out without the gate in
+    // finish() or the destructor: no code that holds the gate reads it.
     std::shared_ptr<HostLoopCore> core_;
     asio::any_io_executor executor_;
     Resume resume_;

@@ -95,6 +95,11 @@ public:
         return asio::any_io_executor(PumpedExecutor<asio::io_context::executor_type>(io_->get_executor(), this));
     }
 
+    // After close() the core holds nothing the host gave and no continuation: the io_context, with every coroutine and
+    // handler in it, and then the host executor and on_error are released here, on the host's thread. The core may
+    // still be destroyed later, on any thread that finishes or discards one of its handoffs (such as a pool thread),
+    // whose reference can be the last. So a member that holds something of
+    // the host's, a continuation or an Asio object is released in close(), never only by the destructor.
     void close() noexcept {
         closed_.store(true);
         disarm();
@@ -139,6 +144,8 @@ public:
     }
 
     // ---- Work that a pool thread does for a coroutine of this loop (loop_handoff.h) ---------------------------------
+    //
+    // "A pool thread" here is any thread that finishes a handoff: a thread of the process's pools.
     //
     // The gate is `handoff_mutex_`. A pool thread posts the continuation with it held, so the io_context is alive for
     // the whole post, and close() takes the continuations that are still waiting with it held, so a pool thread
@@ -770,7 +777,8 @@ private:
     sp::runtime::Executor::Timer timer_ = 0;
     sp::runtime::SteadyTime armed_at_{};
     // What wake reads from any thread. Everything else here belongs to the host thread, except `host_`, which is only
-    // read while the loop is open and is released on the host thread at the end of close().
+    // read while the loop is open and is released on the host thread at the end of close(). The members' own
+    // destruction may run on another thread, after close() (see close()).
     std::atomic<bool> scheduled_{false}, closed_{false};
     // Set by a wake that found a turn scheduled and returned; read and cleared by a wake whose post was refused.
     std::atomic<bool> relied_{false};
