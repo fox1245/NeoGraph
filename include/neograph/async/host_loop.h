@@ -44,9 +44,10 @@
  *     that.
  *
  * Work on the process's pools (#605). The host cannot join the pools that run a synchronous tool, a process tool or a
- * synchronous checkpoint store for a coroutine of the loop, so the library does not ask it to: the loop may be destroyed
- * while such work is still running. Only executors run by a HostLoop (`is_host_pumped`) use this handoff; other
- * executors are unchanged. The destructor takes the coroutine that awaits the pool and destroys it on the host's
+ * synchronous checkpoint store for a coroutine of the loop, so the library does
+ * not ask it to: the loop may be destroyed while such work is still running. Below, "a pool thread" is any of these.
+ * Only executors run by a HostLoop (`is_host_pumped`) use this handoff; other executors are unchanged. The destructor
+ * takes the coroutine that awaits the pool and destroys it on the host's
  * thread, as it does every coroutine that has not finished, and the result is dropped when the work ends. A pool thread
  * posts the result with a lock held that the destructor takes, so it either posts before the destructor runs (the
  * handler is destroyed with the loop's other queued handlers) or finds the coroutine gone, and it touches nothing of the
@@ -60,7 +61,9 @@
  * instead of leaving them waiting. What the work did is not undone, and the tool, and whatever else the work uses, must
  * stay alive until the pool thread has returned from it: the library holds no reference to a `Tool` that it was given
  * by reference. The destructor releases the loop's reference to the host executor and `Options::on_error` on the
- * host's thread once any in-progress pool wake has returned, so a pool thread that finishes later holds neither.
+ * host's thread once any in-progress pool wake has returned, so a pool thread that finishes later holds neither. Such
+ * a thread may release the last of the loop's internal state when it finishes; by then that state holds nothing the
+ * host gave and no coroutine.
  */
 #pragma once
 
