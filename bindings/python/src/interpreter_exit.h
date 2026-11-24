@@ -13,7 +13,8 @@
 //  * An atexit hook, registered when the module is imported, stops those
 //    threads before finalization starts: it stops accepting work, lets the
 //    callbacks that are running finish (the GIL is released while it waits)
-//    and joins the threads. See quiesce_before_finalization().
+//    and joins the threads. See quiesce_before_finalization(). In a child
+//    made by fork it leaves the threads and the waits of its parent alone.
 //  * What is released after that, by a thread that does not hold the GIL
 //    (an abandoned handler destroyed when the process exits, a thread the
 //    binding does not know), is dropped without calling into the interpreter:
@@ -76,9 +77,26 @@ private:
     std::optional<pybind11::gil_scoped_acquire> gil_;
 };
 
+/// Records the process the module was imported in and registers the fork handler (once). Called when the module is
+/// imported; throws std::system_error when the platform cannot register the handler, which fails the import instead of
+/// leaving a child that cannot tell it is one.
+void note_import_process();
+
+/// True in a child made by fork after the module was imported: the binding's threads, and what they were doing, are
+/// the parent's.
+bool process_forked_since_import() noexcept;
+
 /// The atexit hook: stops the threads of the binding that run Python code and
 /// hold Python objects, while the interpreter is still whole. Called with the
 /// GIL released.
+///
+/// In a child made by fork it stops only the threads the child started itself
+/// (process_owned.h) and does not wait for the node attempts: the count of
+/// running attempts belongs to the whole process, so the child cannot tell its
+/// own attempts from the ones its parent's threads were running at the fork,
+/// which no thread of the child can finish, and the lock that guards the count
+/// may have been held by one of them. An attempt the child started and that
+/// outlives its run is therefore not waited for there.
 void quiesce_before_finalization();
 
 // Parts of the hook that live next to what they stop.

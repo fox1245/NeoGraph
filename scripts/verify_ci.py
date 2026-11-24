@@ -300,8 +300,9 @@ def native(args):
         ctest(build, 1, "-R", "^QuickJS[.]CEmbeddingSmoke$", env=env)
     if args.profile == "native-linux":
         # Python's ACP PG fixture shares the destructive native test database
-        # without CTest's resource lock. Run it only after native ctest finishes.
-        ctest(build, args.jobs, "-E", "^pybind_smoke$", env=env)
+        # without CTest's resource lock, and all pybind_* targets run via pytest
+        # below. Run them only after native ctest finishes.
+        ctest(build, args.jobs, "-E", "^pybind_", env=env)
         env = python_env(build)
         run([sys.executable, "-m", "pytest", "-q", "bindings/python/tests/"], env=env)
         env.pop("NEOGRAPH_TEST_POSTGRES_URL", None)
@@ -353,14 +354,14 @@ def sanitizer(args):
         options += definitions(CMAKE_C_COMPILER_LAUNCHER="ccache", CMAKE_CXX_COMPILER_LAUNCHER="ccache")
     configure(build, options)
     build_targets(build, args.jobs, prefix=prefix)
-    # pybind_smoke is run separately below with the interpreter preload boundary.
+    # pybind_* tests run separately below with the interpreter preload boundary.
     # The tests share no state (each takes its own temporary directories, ports and
     # PostgreSQL schemas), so the ASan run uses every job; one at a time it took
     # 79 minutes, more than half of the job. On a slow runner a few timing-bound tests can
     # still miss their budget in parallel, so failures without a sanitizer report get one
     # serial retry.
     sanitizer_ctest(build, args.jobs if asan else min(args.jobs, 2), "-E",
-                    "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix,
+                    "BIG_|valgrind|^pybind_" if asan else "BIG_|valgrind", env=env, prefix=prefix,
                     timeout=SANITIZER_TEST_TIMEOUT if asan else TEST_TIMEOUT)
     for example in ASAN_EXAMPLES if asan else TSAN_EXAMPLES:
         run([*prefix, binary(build, example)], env=env, timeout=90)

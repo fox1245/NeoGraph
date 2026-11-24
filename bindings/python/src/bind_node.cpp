@@ -28,6 +28,7 @@
 #include "json_bridge.h"
 #include "node_failure_bridge.h"
 #include "opaque_types.h"
+#include "process_owned.h"
 #include "provider_bridge.h"
 
 #include <neograph/graph/engine.h>
@@ -313,13 +314,18 @@ PythonToolControlSignal translate_tool_control_signal(py::error_already_set& e) 
 // (interpreter_exit.h). The pools are only stopped if they were started, and
 // after that nothing is offloaded to them: the body runs on the calling thread,
 // as it does for a tool that is not an AsyncTool.
-std::atomic<asio::thread_pool*>& async_tool_pool_started() {
-    static std::atomic<asio::thread_pool*> started{nullptr};
-    return started;
+//
+// A pool belongs to the process that started it (process_owned.h). A child made
+// by fork inherits a copy without its threads: the child neither joins them nor
+// destroys the copy, and starts a pool of its own the first time it offloads a
+// body. Its exit hook stops that one.
+ProcessOwned<asio::thread_pool>& async_tool_pool_owner() {
+    static ProcessOwned<asio::thread_pool> owner;
+    return owner;
 }
-std::atomic<asio::thread_pool*>& python_node_pool_started() {
-    static std::atomic<asio::thread_pool*> started{nullptr};
-    return started;
+ProcessOwned<asio::thread_pool>& python_node_pool_owner() {
+    static ProcessOwned<asio::thread_pool> owner;
+    return owner;
 }
 std::atomic<bool>& worker_pools_are_closed() {
     static std::atomic<bool> closed{false};
@@ -335,15 +341,15 @@ std::atomic<bool>& worker_pools_are_closed() {
 // core count: it bounds how many tool calls can be in flight, not how much CPU
 // is used.
 asio::thread_pool& async_tool_pool() {
-    static asio::thread_pool pool([] {
-        if (const char* env = std::getenv("NEOGRAPH_TOOL_THREADS")) {
-            long n = std::strtol(env, nullptr, 10);
-            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
-        }
-        return static_cast<std::size_t>(32);
-    }());
-    async_tool_pool_started().store(&pool, std::memory_order_release);
-    return pool;
+    return async_tool_pool_owner().get([] {
+        return std::make_unique<asio::thread_pool>([] {
+            if (const char* env = std::getenv("NEOGRAPH_TOOL_THREADS")) {
+                long n = std::strtol(env, nullptr, 10);
+                if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+            }
+            return static_cast<std::size_t>(32);
+        }());
+    });
 }
 
 // Worker pool for Python node bodies on a shared host scheduler (#367, #368).
@@ -353,15 +359,15 @@ asio::thread_pool& async_tool_pool() {
 // the GIL is still taken for the call itself. NEOGRAPH_PYTHON_NODE_THREADS
 // bounds how many bodies can be in flight.
 asio::thread_pool& python_node_pool() {
-    static asio::thread_pool pool([] {
-        if (const char* env = std::getenv("NEOGRAPH_PYTHON_NODE_THREADS")) {
-            long n = std::strtol(env, nullptr, 10);
-            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
-        }
-        return static_cast<std::size_t>(32);
-    }());
-    python_node_pool_started().store(&pool, std::memory_order_release);
-    return pool;
+    return python_node_pool_owner().get([] {
+        return std::make_unique<asio::thread_pool>([] {
+            if (const char* env = std::getenv("NEOGRAPH_PYTHON_NODE_THREADS")) {
+                long n = std::strtol(env, nullptr, 10);
+                if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+            }
+            return static_cast<std::size_t>(32);
+        }());
+    });
 }
 
 // Lets a Python-owned C++ tool (an MCPTool, say) satisfy the engine's
@@ -632,8 +638,10 @@ void close_worker_pools() {
     // is about to stop; then let the bodies that run finish (they need the GIL,
     // which the caller has released) and join the threads.
     worker_pools_are_closed().store(true, std::memory_order_release);
-    for (auto* started : {&async_tool_pool_started(), &python_node_pool_started()}) {
-        if (auto* pool = started->load(std::memory_order_acquire)) {
+    // Only the pools this process started: a copy that a parent made has no
+    // threads here and is left alone.
+    for (auto* owner : {&async_tool_pool_owner(), &python_node_pool_owner()}) {
+        if (auto* pool = owner->current()) {
             pool->stop();
             pool->join();
         }

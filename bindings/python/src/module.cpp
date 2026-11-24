@@ -118,6 +118,12 @@ PYBIND11_MODULE(_neograph, m) {
 #endif
     m.attr("__version__") = NEOGRAPH_PY_VERSION;
 
+    // Record the process the module is imported in, and register the handler
+    // that tells a child made by fork from it, before any thread of the binding
+    // exists (interpreter_exit.h). A platform that cannot register it fails the
+    // import.
+    neograph::pybind::note_import_process();
+
     // Windows system_error::what() follows the active ANSI code page, not
     // UTF-8. Passing it to pybind11's default translator can replace the real
     // socket failure with UnicodeDecodeError. Preserve the error code and
