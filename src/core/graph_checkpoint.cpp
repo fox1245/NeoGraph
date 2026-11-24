@@ -3,6 +3,7 @@
 #include <neograph/async/run_sync.h>
 #include "loop_handoff.h"
 #include "managed_budget_journal.h"
+#include "process_owned.h"
 
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
@@ -90,13 +91,15 @@ namespace {
 asio::thread_pool& blocking_checkpoint_pool() {
     // A process-lifetime bounded pool prevents legacy synchronous stores from
     // pinning the caller's graph executor without creating one thread per
-    // checkpoint operation.
-    static asio::thread_pool pool([] {
+    // checkpoint operation. A child made by fork has none of the parent's
+    // threads: it makes a pool of its own and leaves the parent's alone
+    // (process_owned.h).
+    static ::neograph::detail::ProcessOwned<asio::thread_pool> pool;
+    return pool.get([] {
         const auto hardware = std::thread::hardware_concurrency();
-        return std::max<std::size_t>(
-            2, std::min<std::size_t>(hardware == 0 ? 4 : hardware, 16));
-    }());
-    return pool;
+        return std::make_unique<asio::thread_pool>(std::max<std::size_t>(
+            2, std::min<std::size_t>(hardware == 0 ? 4 : hardware, 16)));
+    });
 }
 
 template <typename Handler>

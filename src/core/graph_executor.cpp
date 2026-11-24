@@ -10,6 +10,7 @@
 #include "dispatched_attempt_seam.h"
 #include "failure_routing.h"
 #include "host_timer.h"
+#include "process_owned.h"
 #include "run_context_runtime.h"
 #include "text_safety.h"
 #include "tool_failure.h"
@@ -514,16 +515,21 @@ constexpr std::chrono::milliseconds kMinAttemptStopGrace{1000};
 
 // Worker threads for dispatched node attempts. Process-wide, created on first
 // use; NEOGRAPH_NODE_ATTEMPT_THREADS (1-1024) overrides the default of 32. A
-// blocking body holds one thread while it runs.
+// blocking body holds one thread while it runs. A child made by fork has none
+// of the parent's threads: it makes a pool of its own the first time it needs
+// one and leaves the parent's alone (process_owned.h).
 asio::thread_pool& attempt_pool() {
-    static asio::thread_pool pool([] {
-        if (const char* env = std::getenv("NEOGRAPH_NODE_ATTEMPT_THREADS")) {
-            const long n = std::strtol(env, nullptr, 10);
-            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
-        }
-        return static_cast<std::size_t>(32);
-    }());
-    return pool;
+    static neograph::detail::ProcessOwned<asio::thread_pool> pool;
+    return pool.get([] {
+        const std::size_t threads = [] {
+            if (const char* env = std::getenv("NEOGRAPH_NODE_ATTEMPT_THREADS")) {
+                const long n = std::strtol(env, nullptr, 10);
+                if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+            }
+            return static_cast<std::size_t>(32);
+        }();
+        return std::make_unique<asio::thread_pool>(threads);
+    });
 }
 
 // The events one dispatched attempt emits through NodeInput::stream_cb. Once

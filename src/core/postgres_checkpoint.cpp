@@ -17,6 +17,7 @@
 #include <neograph/graph/postgres_checkpoint.h>
 #include "managed_budget_journal.h"
 #include "own_json.h"
+#include "process_owned.h"
 
 #include <libpq-fe.h>
 
@@ -895,9 +896,10 @@ struct PoolWaitRegistry {
 };
 
 PoolWaitRegistry& pool_wait_registry() {
-    // Process-lifetime storage avoids static destruction racing a late store.
-    static auto* registry = new PoolWaitRegistry;
-    return *registry;
+    // Process-lifetime ProcessOwned holder avoids static destruction racing a late store while
+    // giving each forked child a fresh, empty, unlocked registry cleanly.
+    static auto* registry = new ::neograph::detail::ProcessOwned<PoolWaitRegistry>();
+    return registry->get([] { return std::make_unique<PoolWaitRegistry>(); });
 }
 
 void register_pool_wait_state(const PostgresCheckpointStore* store) {
@@ -1597,9 +1599,12 @@ asio::thread_pool& connection_start_pool() {
     // PQconnectStart/PQconnectPoll can perform blocking hostname lookup.
     // Keep that work off user executors on a bounded, process-lifetime pool.
     // The intentional process-lifetime allocation also avoids shutdown racing
-    // a resolver call that the platform API does not let us cancel.
-    static auto* pool = new asio::thread_pool(2);
-    return *pool;
+    // a resolver call that the platform API does not let us cancel. The holder
+    // is allocated and never freed for the same reason, so no destructor joins
+    // the pool at exit. A child made by fork has none of the parent's threads:
+    // it makes a pool of its own and leaves the parent's alone.
+    static auto* const holder = new ::neograph::detail::ProcessOwned<asio::thread_pool>();
+    return holder->get([] { return std::make_unique<asio::thread_pool>(2); });
 }
 
 struct ConnectionAttempt {
