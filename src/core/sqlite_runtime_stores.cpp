@@ -1,5 +1,6 @@
 #include <neograph/sqlite_runtime_stores.h>
 #include "canonical_json.h"
+#include "process_generation.h"
 #include "sqlite_wal.h"
 #include <sqlite3.h>
 #include <algorithm>
@@ -83,20 +84,37 @@ struct SQLiteContextStore::Impl {
     Impl(std::string path, std::shared_ptr<sp::NativeArchive> archive_)
         : archive(std::move(archive_)) { open(db, path); }
     ~Impl() { if (db) sqlite3_close_v2(db); }
+    // Every operation passes here on its way to the connection: the copy that a child made by fork inherited refuses
+    // it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() const {
+        opened.check("SQLiteContextStore");
+        return std::lock_guard<std::mutex>(mu);
+    }
     RuntimeHistoryRecord decode(std::string_view bytes, std::string_view owner) const {
         if (archive && archive->owner_scope() != owner)
             throw std::invalid_argument("Context native archive owner mismatch");
         return RuntimeHistoryRecord::parse(bytes, archive, owner);
     }
+    // First, so that it is recorded before the connection is opened.
+    detail::OpenedInProcess opened;
     sqlite3* db = nullptr;
     std::shared_ptr<sp::NativeArchive> archive;
     mutable std::mutex mu;
 };
 SQLiteContextStore::SQLiteContextStore(std::string path, std::shared_ptr<sp::NativeArchive> archive)
     : impl_(std::make_unique<Impl>(std::move(path), std::move(archive))) {}
-SQLiteContextStore::~SQLiteContextStore() = default;
+SQLiteContextStore::~SQLiteContextStore() { detail::release_if_inherited(impl_); }
 SQLiteContextStore::SQLiteContextStore(SQLiteContextStore&&) noexcept = default;
-SQLiteContextStore& SQLiteContextStore::operator=(SQLiteContextStore&&) noexcept = default;
+SQLiteContextStore& SQLiteContextStore::operator=(SQLiteContextStore&& other) noexcept {
+    if (this != &other) {
+        detail::release_if_inherited(impl_);
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
+#ifdef NEOGRAPH_TESTING
+sqlite3* SQLiteContextStore::connection_for_testing() const noexcept { return impl_->db; }
+#endif
 
 ContextStoreAppendResult SQLiteContextStore::append_history(
     const ContextStoreFeed& feed, const RuntimeHistoryRecord& record,
@@ -110,7 +128,7 @@ ContextStoreAppendResult SQLiteContextStore::append_history(
         throw std::invalid_argument("Context native archive owner mismatch");
     if (record.serialize_canonical().size() > InMemoryContextStore::MAX_RECORD_BYTES)
         throw std::invalid_argument("record too large");
-    std::lock_guard lock(impl_->mu);
+    const auto lock = impl_->enter();
     Tx tx(impl_->db);
     Stmt old(impl_->db, "SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");
     old.text(1, feed.owner_id); old.text(2, feed.feed_id); old.i64(3, record.sequence());
@@ -165,7 +183,7 @@ ContextStoreAppendResult SQLiteContextStore::append_history(
 
 ContextStoreHead SQLiteContextStore::history_head(const ContextStoreFeed& feed) const {
     validate_feed(feed);
-    std::lock_guard lock(impl_->mu);
+    const auto lock = impl_->enter();
     Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 ORDER BY sequence DESC LIMIT 1");
     row.text(1, feed.owner_id); row.text(2, feed.feed_id);
     if (!row.row()) return {};
@@ -184,7 +202,7 @@ std::optional<RuntimeHistoryRecord> SQLiteContextStore::history_record_by_messag
     if (message_id.empty() || message_id.size() > 512)
         throw std::invalid_argument("Context history message id is invalid");
     detail::validate_token(message_id, "Context history message id");
-    std::lock_guard lock(impl_->mu);
+    const auto lock = impl_->enter();
     Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND json_extract(CAST(canonical AS TEXT),'$.message_id')=?3");
     row.text(1, feed.owner_id); row.text(2, feed.feed_id); row.text(3, message_id);
     if (!row.row()) return std::nullopt;
@@ -203,7 +221,7 @@ ContextHistoryRange SQLiteContextStore::snapshot_history(
     validate_feed(feed);
     if (!from || through < from || through - from >= InMemoryContextStore::MAX_RANGE_RECORDS)
         throw std::invalid_argument("invalid range");
-    std::lock_guard lock(impl_->mu);
+    const auto lock = impl_->enter();
     Stmt row(impl_->db, "SELECT sequence,record_id,canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence>=?3 AND sequence<=?4 ORDER BY sequence");
     row.text(1, feed.owner_id); row.text(2, feed.feed_id); row.i64(3, from); row.i64(4, through);
     std::string jsonl;
@@ -236,7 +254,7 @@ std::vector<RuntimeHistoryRecord> SQLiteContextStore::hydrate_records(
         range.through_sequence - range.from_sequence >= InMemoryContextStore::MAX_RANGE_RECORDS ||
         !detail::is_sha256_identity(range.digest) || range.artifact_uri != uri(range))
         throw std::invalid_argument("invalid range");
-    std::lock_guard lock(impl_->mu);
+    const auto lock = impl_->enter();
     std::optional<std::string> predecessor;
     if (range.from_sequence > 1) {
         Stmt previous(impl_->db, "SELECT canonical FROM ng_runtime_history WHERE owner_id=?1 AND feed_id=?2 AND sequence=?3");
@@ -283,29 +301,79 @@ std::string SQLiteContextStore::hydrate_history(const ContextHistoryRange& range
     }
     return jsonl;
 }
-ContextArtifactPutResult SQLiteContextStore::put_artifact(std::string_view owner,const ContextArtifact& a){validate_owner(owner);auto b=a.serialize_canonical();if(b.size()>InMemoryContextStore::MAX_ARTIFACT_BYTES)throw std::invalid_argument("artifact too large");std::lock_guard l(impl_->mu);Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,a.id());if(s.row()){auto result=bytes(s.get(),0)==b?ContextArtifactPutResult::AlreadyPresent:ContextArtifactPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_runtime_artifacts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,a.id());p.text(3,b);p.done();tx.commit();return ContextArtifactPutResult::Stored;}
-std::optional<ContextArtifact> SQLiteContextStore::get_artifact(std::string_view owner,std::string_view id)const{validate_owner(owner);if(!detail::is_sha256_identity(id))throw std::invalid_argument("invalid artifact id");std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,id);if(!s.row())return{};return ContextArtifact::parse(bytes(s.get(),0));}
+ContextArtifactPutResult SQLiteContextStore::put_artifact(std::string_view owner,const ContextArtifact& a){validate_owner(owner);auto b=a.serialize_canonical();if(b.size()>InMemoryContextStore::MAX_ARTIFACT_BYTES)throw std::invalid_argument("artifact too large");const auto l = impl_->enter();Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,a.id());if(s.row()){auto result=bytes(s.get(),0)==b?ContextArtifactPutResult::AlreadyPresent:ContextArtifactPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_runtime_artifacts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,a.id());p.text(3,b);p.done();tx.commit();return ContextArtifactPutResult::Stored;}
+std::optional<ContextArtifact> SQLiteContextStore::get_artifact(std::string_view owner,std::string_view id)const{validate_owner(owner);if(!detail::is_sha256_identity(id))throw std::invalid_argument("invalid artifact id");const auto l = impl_->enter();Stmt s(impl_->db,"SELECT canonical FROM ng_runtime_artifacts WHERE owner_id=?1 AND artifact_id=?2");s.text(1,owner);s.text(2,id);if(!s.row())return{};return ContextArtifact::parse(bytes(s.get(),0));}
 
-struct SQLiteHookJournal::Impl { explicit Impl(std::string p){open(db,p);} ~Impl(){if(db)sqlite3_close_v2(db);} sqlite3* db=nullptr;mutable std::mutex mu;};
-SQLiteHookJournal::SQLiteHookJournal(std::string p):impl_(std::make_unique<Impl>(std::move(p))){} SQLiteHookJournal::~SQLiteHookJournal()=default; SQLiteHookJournal::SQLiteHookJournal(SQLiteHookJournal&&) noexcept=default; SQLiteHookJournal& SQLiteHookJournal::operator=(SQLiteHookJournal&&) noexcept=default;
-HookOutboxEntry SQLiteHookJournal::enqueue(HookInvocation i,RuntimeEvent e,std::uint32_t max,Clock::time_point deadline){auto candidate=HookOutboxEntry::create({std::move(i),std::move(e),HookExecutionState::Triggered,0,max,deadline});std::lock_guard l(impl_->mu);Tx tx(impl_->db);auto existing=hook(impl_->db,candidate.data().invocation.id());if(existing){if(existing->data().invocation.serialize_canonical()!=candidate.data().invocation.serialize_canonical()||existing->data().event.serialize_canonical()!=candidate.data().event.serialize_canonical()||existing->data().max_attempts!=max||existing->data().deadline!=deadline)throw std::invalid_argument("logical hook invocation enqueue conflict");tx.commit();return *existing;}Stmt s(impl_->db,"INSERT INTO ng_hook_outbox VALUES(?1,?2,?3)");s.text(1,candidate.data().invocation.id());s.text(2,candidate.serialize_canonical());s.i64(3,static_cast<unsigned>(candidate.data().state));s.done();tx.commit();return candidate;}
-HookOutboxEntry SQLiteHookJournal::publish(std::string_view id){std::lock_guard l(impl_->mu);Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e)throw std::out_of_range("hook invocation is not enqueued");if(e->data().state==HookExecutionState::Triggered){auto d=e->data();d.state=HookExecutionState::Pending;*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);}tx.commit();return *e;}
-std::optional<HookLease> SQLiteHookJournal::claim(std::string_view id,std::string_view worker,Clock::time_point now,std::chrono::milliseconds duration){if(worker.empty()||duration<=std::chrono::milliseconds::zero())throw std::invalid_argument("invalid hook claim");std::lock_guard l(impl_->mu);Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e){tx.commit();return{};}auto d=e->data();if(d.deadline<=now&&!settled(d)){d.state=HookExecutionState::TimedOut;d.lease_expires_at={};*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}if(d.state==HookExecutionState::Dispatched&&d.lease_expires_at<=now){d.lease_expires_at={};if(d.invocation.data().idempotency==HookIdempotency::NonIdempotent){d.state=HookExecutionState::ReconciliationRequired;d.receipt=HookExecutionReceipt::create({d.invocation.id(),d.attempt_count,HookExecutionState::ReconciliationRequired,{},"non-idempotent dispatched lease expired; external outcome is unknown"});*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}d.state=HookExecutionState::Failed;d.receipt=HookExecutionReceipt::create({d.invocation.id(),d.attempt_count,HookExecutionState::Failed,{},"idempotent dispatched lease expired"});*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);d=e->data();}if(d.state!=HookExecutionState::Pending&&!(d.state==HookExecutionState::Failed&&d.attempt_count<d.max_attempts)){tx.commit();return{};}if(d.attempt_count>=d.max_attempts){d.state=HookExecutionState::TimedOut;*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}d.state=HookExecutionState::Dispatched;++d.attempt_count;++d.fencing_token;d.receipt.reset();d.lease_expires_at=std::min(d.deadline,now+duration);*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return HookLease{*e,e->data().fencing_token};}
-std::optional<HookOutboxEntry> SQLiteHookJournal::settle(std::string_view id,std::uint64_t fence,HookExecutionReceipt receipt,Clock::time_point now){std::lock_guard l(impl_->mu);Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e){tx.commit();return{};}auto d=e->data();if(d.state!=HookExecutionState::Dispatched||d.fencing_token!=fence||d.lease_expires_at<now||receipt.data().invocation_id!=id||receipt.data().attempt!=d.attempt_count){tx.commit();return{};}d.receipt=std::move(receipt);d.state=d.receipt->data().state;d.lease_expires_at={};*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return e;}
-std::optional<HookOutboxEntry> SQLiteHookJournal::reconcile(std::string_view id,HookExecutionState expected,std::string_view head,std::uint64_t fence,HookExecutionReceipt known){std::lock_guard l(impl_->mu);Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e||e->data().state!=expected||e->id()!=head||e->data().fencing_token!=fence||expected!=HookExecutionState::ReconciliationRequired||!known.data().external_effect.outcome_known||known.data().invocation_id!=id||known.data().attempt!=e->data().attempt_count||(known.data().state!=HookExecutionState::Succeeded&&known.data().state!=HookExecutionState::Failed)){tx.commit();return{};}auto d=e->data();d.state=known.data().state;d.receipt=std::move(known);*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return e;}
-std::optional<HookOutboxEntry> SQLiteHookJournal::get(std::string_view id)const{std::lock_guard l(impl_->mu);return hook(impl_->db,id);}
-std::vector<HookOutboxEntry> SQLiteHookJournal::pending()const{std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT invocation_id,canonical,state FROM ng_hook_outbox");std::vector<HookOutboxEntry> out;while(s.row()){auto id=text(s.get(),0);auto canonical=bytes(s.get(),1);auto entry=checked_hook(id,sqlite3_column_int64(s.get(),2),canonical);if(!settled(entry.data()))out.push_back(std::move(entry));}return out;}
-std::vector<HookOutboxEntry> SQLiteHookJournal::reconciliation_required()const{std::lock_guard l(impl_->mu);Stmt s(impl_->db,"SELECT invocation_id,canonical,state FROM ng_hook_outbox");std::vector<HookOutboxEntry> out;while(s.row()){auto id=text(s.get(),0);auto canonical=bytes(s.get(),1);auto entry=checked_hook(id,sqlite3_column_int64(s.get(),2),canonical);if(entry.data().state==HookExecutionState::ReconciliationRequired)out.push_back(std::move(entry));}return out;}
+struct SQLiteHookJournal::Impl {
+    explicit Impl(std::string p) { open(db, p); }
+    ~Impl() { if (db) sqlite3_close_v2(db); }
+    // Every operation passes here on its way to the connection: the copy that a child made by fork inherited refuses
+    // it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() const {
+        opened.check("SQLiteHookJournal");
+        return std::lock_guard<std::mutex>(mu);
+    }
+    // First, so that it is recorded before the connection is opened.
+    detail::OpenedInProcess opened;
+    sqlite3* db = nullptr;
+    mutable std::mutex mu;
+};
+SQLiteHookJournal::SQLiteHookJournal(std::string p):impl_(std::make_unique<Impl>(std::move(p))){}
+SQLiteHookJournal::~SQLiteHookJournal() { detail::release_if_inherited(impl_); }
+SQLiteHookJournal::SQLiteHookJournal(SQLiteHookJournal&&) noexcept=default;
+SQLiteHookJournal& SQLiteHookJournal::operator=(SQLiteHookJournal&& other) noexcept {
+    if (this != &other) {
+        detail::release_if_inherited(impl_);
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
+#ifdef NEOGRAPH_TESTING
+sqlite3* SQLiteHookJournal::connection_for_testing() const noexcept { return impl_->db; }
+#endif
+HookOutboxEntry SQLiteHookJournal::enqueue(HookInvocation i,RuntimeEvent e,std::uint32_t max,Clock::time_point deadline){auto candidate=HookOutboxEntry::create({std::move(i),std::move(e),HookExecutionState::Triggered,0,max,deadline});const auto l = impl_->enter();Tx tx(impl_->db);auto existing=hook(impl_->db,candidate.data().invocation.id());if(existing){if(existing->data().invocation.serialize_canonical()!=candidate.data().invocation.serialize_canonical()||existing->data().event.serialize_canonical()!=candidate.data().event.serialize_canonical()||existing->data().max_attempts!=max||existing->data().deadline!=deadline)throw std::invalid_argument("logical hook invocation enqueue conflict");tx.commit();return *existing;}Stmt s(impl_->db,"INSERT INTO ng_hook_outbox VALUES(?1,?2,?3)");s.text(1,candidate.data().invocation.id());s.text(2,candidate.serialize_canonical());s.i64(3,static_cast<unsigned>(candidate.data().state));s.done();tx.commit();return candidate;}
+HookOutboxEntry SQLiteHookJournal::publish(std::string_view id){const auto l = impl_->enter();Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e)throw std::out_of_range("hook invocation is not enqueued");if(e->data().state==HookExecutionState::Triggered){auto d=e->data();d.state=HookExecutionState::Pending;*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);}tx.commit();return *e;}
+std::optional<HookLease> SQLiteHookJournal::claim(std::string_view id,std::string_view worker,Clock::time_point now,std::chrono::milliseconds duration){if(worker.empty()||duration<=std::chrono::milliseconds::zero())throw std::invalid_argument("invalid hook claim");const auto l = impl_->enter();Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e){tx.commit();return{};}auto d=e->data();if(d.deadline<=now&&!settled(d)){d.state=HookExecutionState::TimedOut;d.lease_expires_at={};*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}if(d.state==HookExecutionState::Dispatched&&d.lease_expires_at<=now){d.lease_expires_at={};if(d.invocation.data().idempotency==HookIdempotency::NonIdempotent){d.state=HookExecutionState::ReconciliationRequired;d.receipt=HookExecutionReceipt::create({d.invocation.id(),d.attempt_count,HookExecutionState::ReconciliationRequired,{},"non-idempotent dispatched lease expired; external outcome is unknown"});*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}d.state=HookExecutionState::Failed;d.receipt=HookExecutionReceipt::create({d.invocation.id(),d.attempt_count,HookExecutionState::Failed,{},"idempotent dispatched lease expired"});*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);d=e->data();}if(d.state!=HookExecutionState::Pending&&!(d.state==HookExecutionState::Failed&&d.attempt_count<d.max_attempts)){tx.commit();return{};}if(d.attempt_count>=d.max_attempts){d.state=HookExecutionState::TimedOut;*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return{};}d.state=HookExecutionState::Dispatched;++d.attempt_count;++d.fencing_token;d.receipt.reset();d.lease_expires_at=std::min(d.deadline,now+duration);*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return HookLease{*e,e->data().fencing_token};}
+std::optional<HookOutboxEntry> SQLiteHookJournal::settle(std::string_view id,std::uint64_t fence,HookExecutionReceipt receipt,Clock::time_point now){const auto l = impl_->enter();Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e){tx.commit();return{};}auto d=e->data();if(d.state!=HookExecutionState::Dispatched||d.fencing_token!=fence||d.lease_expires_at<now||receipt.data().invocation_id!=id||receipt.data().attempt!=d.attempt_count){tx.commit();return{};}d.receipt=std::move(receipt);d.state=d.receipt->data().state;d.lease_expires_at={};*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return e;}
+std::optional<HookOutboxEntry> SQLiteHookJournal::reconcile(std::string_view id,HookExecutionState expected,std::string_view head,std::uint64_t fence,HookExecutionReceipt known){const auto l = impl_->enter();Tx tx(impl_->db);auto e=hook(impl_->db,id);if(!e||e->data().state!=expected||e->id()!=head||e->data().fencing_token!=fence||expected!=HookExecutionState::ReconciliationRequired||!known.data().external_effect.outcome_known||known.data().invocation_id!=id||known.data().attempt!=e->data().attempt_count||(known.data().state!=HookExecutionState::Succeeded&&known.data().state!=HookExecutionState::Failed)){tx.commit();return{};}auto d=e->data();d.state=known.data().state;d.receipt=std::move(known);*e=HookOutboxEntry::create(std::move(d));save_hook(impl_->db,*e);tx.commit();return e;}
+std::optional<HookOutboxEntry> SQLiteHookJournal::get(std::string_view id)const{const auto l = impl_->enter();return hook(impl_->db,id);}
+std::vector<HookOutboxEntry> SQLiteHookJournal::pending()const{const auto l = impl_->enter();Stmt s(impl_->db,"SELECT invocation_id,canonical,state FROM ng_hook_outbox");std::vector<HookOutboxEntry> out;while(s.row()){auto id=text(s.get(),0);auto canonical=bytes(s.get(),1);auto entry=checked_hook(id,sqlite3_column_int64(s.get(),2),canonical);if(!settled(entry.data()))out.push_back(std::move(entry));}return out;}
+std::vector<HookOutboxEntry> SQLiteHookJournal::reconciliation_required()const{const auto l = impl_->enter();Stmt s(impl_->db,"SELECT invocation_id,canonical,state FROM ng_hook_outbox");std::vector<HookOutboxEntry> out;while(s.row()){auto id=text(s.get(),0);auto canonical=bytes(s.get(),1);auto entry=checked_hook(id,sqlite3_column_int64(s.get(),2),canonical);if(entry.data().state==HookExecutionState::ReconciliationRequired)out.push_back(std::move(entry));}return out;}
 
-struct SQLiteProviderDispatchReceiptStore::Impl { explicit Impl(std::string p){open(db,p);} ~Impl(){if(db)sqlite3_close_v2(db);} sqlite3* db=nullptr;mutable std::mutex mu;};
-SQLiteProviderDispatchReceiptStore::SQLiteProviderDispatchReceiptStore(std::string p):impl_(std::make_unique<Impl>(std::move(p))){} SQLiteProviderDispatchReceiptStore::~SQLiteProviderDispatchReceiptStore()=default; SQLiteProviderDispatchReceiptStore::SQLiteProviderDispatchReceiptStore(SQLiteProviderDispatchReceiptStore&&) noexcept=default; SQLiteProviderDispatchReceiptStore& SQLiteProviderDispatchReceiptStore::operator=(SQLiteProviderDispatchReceiptStore&&) noexcept=default;
+struct SQLiteProviderDispatchReceiptStore::Impl {
+    explicit Impl(std::string p) { open(db, p); }
+    ~Impl() { if (db) sqlite3_close_v2(db); }
+    // Every operation passes here on its way to the connection: the copy that a child made by fork inherited refuses
+    // it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() const {
+        opened.check("SQLiteProviderDispatchReceiptStore");
+        return std::lock_guard<std::mutex>(mu);
+    }
+    // First, so that it is recorded before the connection is opened.
+    detail::OpenedInProcess opened;
+    sqlite3* db = nullptr;
+    mutable std::mutex mu;
+};
+SQLiteProviderDispatchReceiptStore::SQLiteProviderDispatchReceiptStore(std::string p):impl_(std::make_unique<Impl>(std::move(p))){}
+SQLiteProviderDispatchReceiptStore::~SQLiteProviderDispatchReceiptStore() { detail::release_if_inherited(impl_); }
+SQLiteProviderDispatchReceiptStore::SQLiteProviderDispatchReceiptStore(SQLiteProviderDispatchReceiptStore&&) noexcept=default;
+SQLiteProviderDispatchReceiptStore& SQLiteProviderDispatchReceiptStore::operator=(SQLiteProviderDispatchReceiptStore&& other) noexcept {
+    if (this != &other) {
+        detail::release_if_inherited(impl_);
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
+#ifdef NEOGRAPH_TESTING
+sqlite3* SQLiteProviderDispatchReceiptStore::connection_for_testing() const noexcept { return impl_->db; }
+#endif
 ProviderDispatchReceiptPutResult SQLiteProviderDispatchReceiptStore::persist(const ProviderDispatchReceipt& r){return persist({},r);}
-ProviderDispatchReceiptPutResult SQLiteProviderDispatchReceiptStore::persist(std::string_view owner,const ProviderDispatchReceipt& r){validate_receipt_owner(owner);auto b=r.serialize_canonical();std::lock_guard l(impl_->mu);Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");s.text(1,owner);s.text(2,r.dispatch_id());if(s.row()){const auto stored=bytes(s.get(),0);if(ProviderDispatchReceipt::parse(stored).dispatch_id()!=r.dispatch_id())throw std::runtime_error("SQLite provider receipt dispatch identity mismatch");auto result=stored==b?ProviderDispatchReceiptPutResult::AlreadyPresent:ProviderDispatchReceiptPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_provider_receipts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,r.dispatch_id());p.text(3,b);p.done();tx.commit();return ProviderDispatchReceiptPutResult::Stored;}
+ProviderDispatchReceiptPutResult SQLiteProviderDispatchReceiptStore::persist(std::string_view owner,const ProviderDispatchReceipt& r){validate_receipt_owner(owner);auto b=r.serialize_canonical();const auto l = impl_->enter();Tx tx(impl_->db);Stmt s(impl_->db,"SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");s.text(1,owner);s.text(2,r.dispatch_id());if(s.row()){const auto stored=bytes(s.get(),0);if(ProviderDispatchReceipt::parse(stored).dispatch_id()!=r.dispatch_id())throw std::runtime_error("SQLite provider receipt dispatch identity mismatch");auto result=stored==b?ProviderDispatchReceiptPutResult::AlreadyPresent:ProviderDispatchReceiptPutResult::Conflict;tx.commit();return result;}Stmt p(impl_->db,"INSERT INTO ng_provider_receipts VALUES(?1,?2,?3)");p.text(1,owner);p.text(2,r.dispatch_id());p.text(3,b);p.done();tx.commit();return ProviderDispatchReceiptPutResult::Stored;}
 ProviderDispatchState SQLiteProviderDispatchReceiptStore::state(std::string_view id)const{return state({},id);}
 ProviderDispatchState SQLiteProviderDispatchReceiptStore::state(
     std::string_view owner, std::string_view id) const {
     validate_receipt_owner(owner);
-    std::lock_guard l(impl_->mu);
+    const auto l = impl_->enter();
     Stmt terminal(impl_->db,
                   "SELECT canonical,state FROM ng_provider_outcomes WHERE owner_scope=?1 AND dispatch_id=?2");
     terminal.text(1, owner);
@@ -345,7 +413,7 @@ ProviderDispatchOutcomePutResult SQLiteProviderDispatchReceiptStore::settle(
     std::string_view owner, const ProviderDispatchOutcomeReceipt& outcome_receipt) {
     validate_receipt_owner(owner);
     const auto canonical = outcome_receipt.serialize_canonical();
-    std::lock_guard l(impl_->mu);
+    const auto l = impl_->enter();
     Tx tx(impl_->db);
     Stmt pending(impl_->db,
                  "SELECT canonical FROM ng_provider_receipts WHERE owner_scope=?1 AND dispatch_id=?2");
@@ -386,7 +454,7 @@ std::optional<ProviderDispatchOutcomeReceipt>
 SQLiteProviderDispatchReceiptStore::outcome(
     std::string_view owner, std::string_view id) const {
     validate_receipt_owner(owner);
-    std::lock_guard l(impl_->mu);
+    const auto l = impl_->enter();
     Stmt statement(impl_->db,
                    "SELECT canonical,state FROM ng_provider_outcomes WHERE owner_scope=?1 AND dispatch_id=?2");
     statement.text(1, owner);

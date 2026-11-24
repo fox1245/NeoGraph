@@ -1,5 +1,6 @@
 #include <neograph/sqlite_runtime_stores.h>
 #include "canonical_json.h"
+#include "process_generation.h"
 #include "sqlite_wal.h"
 
 #include <sqlite3.h>
@@ -122,6 +123,8 @@ ToolExecutionResult decode(const std::string& encoded) {
 
 struct SQLiteToolEffectBroker::Impl {
     struct Binding { std::string executable_id; std::string tool_name; };
+    // First, so that it is recorded before the connection is opened.
+    detail::OpenedInProcess opened;
     sqlite3* db = nullptr;
     std::mutex mutex;
     std::unordered_map<const Tool*, Binding> bindings;
@@ -163,10 +166,17 @@ SQLiteToolEffectBroker::SQLiteToolEffectBroker(
     )");
 }
 
-SQLiteToolEffectBroker::~SQLiteToolEffectBroker() = default;
+SQLiteToolEffectBroker::~SQLiteToolEffectBroker() { detail::release_if_inherited(impl_); }
+
+#ifdef NEOGRAPH_TESTING
+sqlite3* SQLiteToolEffectBroker::connection_for_testing() const noexcept { return impl_->db; }
+#endif
 
 asio::awaitable<ToolExecutionResult> SQLiteToolEffectBroker::execute(
     ToolEffectIdentity identity, Tool& tool, json arguments, ToolExecutionContext context) {
+    // The one operation is refused here, in the copy that a child made by fork inherited, before the call is checked
+    // or anything of the store is touched: the marker write below turns its errors into a result.
+    impl_->opened.check("SQLiteToolEffectBroker");
     if (identity.owner_scope.empty() || identity.run_id.empty() || identity.thread_id.empty() ||
         identity.task_id.empty() || identity.operation_id.empty() || identity.grant_id.empty())
         co_return refusal(ToolTerminalStatus::Rejected, "Tool effect requires exact host grant and stable slot");

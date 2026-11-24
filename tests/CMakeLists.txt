@@ -865,6 +865,24 @@ if(NEOGRAPH_BUILD_SQLITE)
     endif()
 endif()
 
+if(NEOGRAPH_BUILD_SQLITE AND NOT WIN32)
+    # A store that a child made by fork inherited from its parent (fork_child.h). Each test takes milliseconds; a child
+    # that hangs is ended with its test by the bound below. The label lets a sanitizer leg select these tests.
+    add_executable(neograph_store_fork_tests test_store_in_forked_child.cpp)
+    target_compile_definitions(neograph_store_fork_tests PRIVATE NEOGRAPH_TESTING)
+    target_link_libraries(neograph_store_fork_tests PRIVATE
+        neograph::core
+        neograph::sqlite
+        SQLite::SQLite3
+        GTest::gtest_main
+    )
+    if(TARGET neograph_program_sqlite)
+        target_compile_definitions(neograph_store_fork_tests PRIVATE NEOGRAPH_STORE_FORK_TESTS_HAVE_PROGRAM_SQLITE)
+        target_link_libraries(neograph_store_fork_tests PRIVATE neograph::program neograph::program_sqlite)
+    endif()
+    neograph_discover_tests(neograph_store_fork_tests PROPERTIES TIMEOUT 30 LABELS "sqlite;fork")
+endif()
+
 if(NEOGRAPH_BUILD_SQLITE)
     # Data written by a released version still opens, reads and resumes with
     # the current stores (#609). Each test copies the committed file first.

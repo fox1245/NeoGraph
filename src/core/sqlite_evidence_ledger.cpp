@@ -1,5 +1,7 @@
 #include <neograph/research/sqlite_evidence_ledger.h>
 
+#include "process_generation.h"
+
 #include "own_json.h"
 
 #include <sqlite3.h>
@@ -643,6 +645,15 @@ struct SqliteEvidenceLedger::Impl {
         if (db) sqlite3_close(db);
     }
 
+    // Every operation passes here on its way to the connection: the copy that a child made by fork inherited refuses
+    // it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() const {
+        opened.check("SqliteEvidenceLedger");
+        return std::lock_guard<std::mutex>(mutex);
+    }
+
+    // First, so that it is recorded before the connection is opened.
+    neograph::detail::OpenedInProcess opened;
     mutable std::mutex mutex;
     sqlite3* db = nullptr;
 };
@@ -652,13 +663,21 @@ SqliteEvidenceLedger::SqliteEvidenceLedger(const std::string& db_path)
 
 SqliteEvidenceLedger::SqliteEvidenceLedger(const std::string& db_path,
                                            std::chrono::milliseconds busy_timeout)
-    : impl_(std::make_shared<Impl>(db_path, busy_timeout)) {}
+    // The copy that a child made by fork inherited is released without being destroyed: no call reaches SQLite there
+    // and no lock is taken (see detail::release_if_inherited).
+    : impl_(new Impl(db_path, busy_timeout), [](Impl* impl) {
+          if (!impl->opened.inherited()) delete impl;
+      }) {}
 
 SqliteEvidenceLedger::~SqliteEvidenceLedger() = default;
 
+#ifdef NEOGRAPH_TESTING
+sqlite3* SqliteEvidenceLedger::connection_for_testing() const noexcept { return impl_->db; }
+#endif
+
 void SqliteEvidenceLedger::register_source(SourceIdentity source) {
     validate_source(source);
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
 
     if (const auto existing = load_source(impl_->db, source.source_id)) {
@@ -728,7 +747,7 @@ INSERT INTO neograph_research_source
 }
 
 std::optional<SourceIdentity> SqliteEvidenceLedger::source(std::string_view source_id) const {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     if (const auto direct = load_source(impl_->db, source_id)) return direct;
     Statement alias(impl_->db,
                     "SELECT source_id FROM neograph_research_source_alias WHERE alias = ?");
@@ -741,7 +760,7 @@ std::optional<SourceIdentity> SqliteEvidenceLedger::source(std::string_view sour
 
 void SqliteEvidenceLedger::create_task(ResearchTaskSpec spec) {
     validate_task(spec);
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
 
     if (!load_source(impl_->db, spec.source_id)) {
@@ -804,7 +823,7 @@ std::optional<ResearchTask> SqliteEvidenceLedger::task(std::string_view owner_sc
                                                         std::string_view task_id) const {
     require_nonempty(owner_scope, "task owner_scope");
     require_nonempty(task_id, "task_id");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     const auto found = load_task(impl_->db, task_id);
     if (!found || found->spec.owner_scope != owner_scope) return std::nullopt;
     return found;
@@ -813,7 +832,7 @@ std::optional<ResearchTask> SqliteEvidenceLedger::task(std::string_view owner_sc
 std::vector<ResearchTask>
 SqliteEvidenceLedger::tasks(std::string_view owner_scope, bool include_terminal) const {
     require_nonempty(owner_scope, "task owner_scope");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     const char* sql = include_terminal
         ? R"SQL(
 SELECT payload FROM neograph_research_task
@@ -842,7 +861,7 @@ SqliteEvidenceLedger::acquire_lease(ResearchLeaseRequest request) {
     require_nonempty(request.worker_id, "lease worker_id");
     require_nonempty(request.owner_scope, "lease owner_scope");
     require(request.now_unix_ms > 0, "lease now_unix_ms must be explicit and positive");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
     auto task = load_task(impl_->db, request.task_id);
     if (!task) {
@@ -910,7 +929,7 @@ bool SqliteEvidenceLedger::renew_lease(const ResearchTaskLease& lease,
     require_nonempty(lease.worker_id, "lease worker_id");
     require_nonempty(lease.owner_scope, "lease owner_scope");
     require(now_unix_ms > 0, "lease now_unix_ms must be explicit and positive");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
     auto task = load_task(impl_->db, lease.task_id);
     if (!task || task->spec.owner_scope != lease.owner_scope
@@ -931,7 +950,7 @@ std::vector<std::string> SqliteEvidenceLedger::expire_leases(std::string_view ow
                                                               std::uint64_t now_unix_ms) {
     require_nonempty(owner_scope, "lease owner_scope");
     require(now_unix_ms > 0, "lease now_unix_ms must be explicit and positive");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
     Statement select(impl_->db, R"SQL(
 SELECT payload FROM neograph_research_task
@@ -965,7 +984,7 @@ EvidencePublishResult SqliteEvidenceLedger::publish(const ResearchTaskLease& lea
     require_nonempty(lease.worker_id, "lease worker_id");
     require_nonempty(lease.owner_scope, "lease owner_scope");
     require(now_unix_ms > 0, "publish now_unix_ms must be explicit and positive");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Transaction transaction(impl_->db);
     auto task = load_task(impl_->db, lease.task_id);
     if (!task) throw std::invalid_argument("cannot publish unknown research task");
@@ -1024,7 +1043,7 @@ SqliteEvidenceLedger::artifacts_for_claim(std::string_view owner_scope,
                                           std::string_view claim_id) const {
     require_nonempty(owner_scope, "artifact owner_scope");
     require_nonempty(claim_id, "claim_id");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement statement(impl_->db, R"SQL(
 SELECT payload FROM neograph_research_artifact
 WHERE owner_scope = ? AND claim_id = ? ORDER BY artifact_id
@@ -1047,7 +1066,7 @@ SourceLifecycle SqliteEvidenceLedger::source_lifecycle(std::string_view owner_sc
     require_nonempty(owner_scope, "lifecycle owner_scope");
     require_nonempty(source_id, "source_id");
     require(now_unix_ms > 0, "lifecycle now_unix_ms must be explicit and positive");
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     if (!load_source(impl_->db, source_id)) {
         throw std::invalid_argument("unknown source identity");
     }
