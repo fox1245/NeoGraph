@@ -4,6 +4,7 @@
 #include "../program/canonical_json.h"
 #include "../program/transition_validator.h"
 #include "../core/own_json.h"
+#include "../core/process_generation.h"
 #include "../core/json_walk.h"
 #include "../core/sqlite_wal.h"
 #include <sqlite3.h>
@@ -1138,7 +1139,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
 
     std::optional<json> load(const char* table, const char* id_column, const std::string& id) {
         validate_id(id);
-        std::lock_guard   lock(mutex);
+        const auto lock = enter();
         const std::string sql =
             std::string("SELECT record_json FROM ") + table + " WHERE " + id_column + " = ?";
         Statement statement(db, sql.c_str());
@@ -1149,6 +1150,15 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
         return parse_own_json(statement.text(0));
     }
 
+    // Every operation of the store and of the Program transition store bound to it passes here on its way to the
+    // connection: the copy that a child made by fork inherited refuses it before the lock is taken.
+    [[nodiscard]] std::lock_guard<std::mutex> enter() {
+        opened.check("SqliteHarnessRecordStore");
+        return std::lock_guard<std::mutex>(mutex);
+    }
+
+    // First, so that it is recorded before the connection is opened.
+    neograph::detail::OpenedInProcess opened;
     sqlite3*                   db = nullptr;
     std::string                program_coordination_key;
     std::mutex                 mutex;
@@ -1185,7 +1195,7 @@ public:
     std::optional<program::ProgramJournalRecord> latest_sync(std::string_view owner_scope,
                                                         std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(impl_->db,
                               "SELECT j.record_json, r.bundle_id, r.program_version_id, "
                                     "j.owner_scope, j.bundle_id, j.program_version_id "
@@ -1223,7 +1233,7 @@ public:
         if (after_sequence > static_cast<std::uint64_t>(INT64_MAX)) {
             throw std::invalid_argument("Program event sequence is out of SQLite range");
         }
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(impl_->db,
                               "SELECT e.sequence, e.record_json, r.bundle_id, r.program_version_id, "
                                     "e.owner_scope, e.bundle_id, e.program_version_id "
@@ -1261,7 +1271,7 @@ public:
         if (after_sequence > static_cast<std::uint64_t>(INT64_MAX)) {
             throw std::invalid_argument("Program effect sequence is out of SQLite range");
         }
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(impl_->db,
                               "SELECT e.sequence, e.record_json, e.owner_scope "
                                     "FROM neograph_harness_program_effects e "
@@ -1296,7 +1306,7 @@ public:
             throw std::invalid_argument(
                 "Program JavaScript command sequence is out of SQLite range");
         }
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(impl_->db,
                               "SELECT c.sequence, c.record_json, c.owner_scope, c.bundle_id, "
                                     "c.coordinate_id, c.record_id "
@@ -1336,14 +1346,14 @@ public:
         if (after_sequence > static_cast<std::uint64_t>(INT64_MAX)) {
             throw std::invalid_argument("Program context sequence is out of SQLite range");
         }
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_context_publications_locked(owner_scope, run_id, after_sequence);
     }
 
     std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return {};
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         const auto wrapper = load_wrapper_locked(owner_scope, run_id);
         if (!wrapper) return {};
         auto entries = load_hook_outbox_entries_locked(owner_scope, run_id);
@@ -1363,7 +1373,7 @@ public:
         std::string_view owner_scope, std::string_view run_id) const override {
         const auto wrapper = load_wrapper(owner_scope, run_id);
         if (!wrapper) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(
             impl_->db,
             "SELECT program_publication_json FROM neograph_harness_runs "
@@ -1387,7 +1397,7 @@ public:
     std::optional<program::ProgramRunLineage> load_lineage_sync(
         std::string_view owner_scope, std::string_view lineage_id) const override {
         if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement query(impl_->db,
                         "SELECT head_id, record_json FROM "
                         "neograph_harness_program_lineage_heads "
@@ -1408,7 +1418,7 @@ public:
     std::optional<program::ProgramRunLineage> load_run_lineage_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement query(impl_->db,
                         "SELECT r.lineage_id, h.head_id, h.record_json FROM "
                         "neograph_harness_program_lineage_runs r "
@@ -1434,7 +1444,7 @@ public:
         std::string_view lineage_id,
         std::string_view head_id) const override {
         if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement query(impl_->db,
                         "SELECT record_json FROM neograph_harness_program_lineage_history "
                         "WHERE owner_scope=? AND lineage_id=? AND head_id=?");
@@ -1460,7 +1470,7 @@ public:
         if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
         if (generation > static_cast<std::uint64_t>(INT64_MAX))
             throw std::invalid_argument("Program generation is out of SQLite range");
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement query(impl_->db,
                         "SELECT generation_id, record_json FROM "
                         "neograph_harness_program_generations "
@@ -1487,7 +1497,7 @@ public:
         if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
         if (generation > static_cast<std::uint64_t>(INT64_MAX))
             throw std::invalid_argument("Program generation is out of SQLite range");
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement query(
             impl_->db,
             "SELECT p.generation_id, p.publication_json, g.generation_id FROM "
@@ -1521,21 +1531,21 @@ public:
         std::string_view source_lineage_head_id) const override {
         if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
             return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_graph_migration_capsule_locked(
             owner_scope, source_run_id, source_lineage_head_id);
     }
     std::optional<program::ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_execution_lease_locked(owner_scope, run_id);
     }
 
     std::optional<program::ProgramChildRelationHead> load_child_relation_head_sync(
         std::string_view owner_scope, std::string_view parent_run_id) const override {
         if (owner_scope.empty() || parent_run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_relation_head_locked(owner_scope, parent_run_id);
     }
 
@@ -1543,7 +1553,7 @@ public:
         std::string_view owner_scope, std::string_view parent_run_id,
         std::string_view child_run_id) const override {
         if (owner_scope.empty() || parent_run_id.empty() || child_run_id.empty()) return std::nullopt;
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_relation_row_locked(owner_scope, parent_run_id, child_run_id);
     }
 
@@ -1551,7 +1561,7 @@ public:
         std::string_view owner_scope, std::string_view parent_run_id,
         bool open_only) const override {
         if (owner_scope.empty() || parent_run_id.empty()) return {};
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         Statement       query(impl_->db,
                               open_only ? "SELECT record_json FROM neograph_harness_program_child_relations "
                                           "WHERE owner_scope=? AND parent_run_id=? AND open=1 ORDER BY ordinal"
@@ -1658,7 +1668,7 @@ public:
             expected_fence == std::numeric_limits<std::uint64_t>::max()) {
             return program::ProgramTransitionPublishResult::Conflict;
         }
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         impl_->exec("BEGIN IMMEDIATE;");
         try {
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterBegin);
@@ -1921,7 +1931,7 @@ public:
         const auto      run_id             = publication.run_record.run_id();
         const auto      storage_run_id     = program_storage_run_id(owner_scope, run_id);
         const auto      serialized_wrapper = wrapper->serialize().dump();
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         impl_->exec("BEGIN IMMEDIATE;");
         try {
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterBegin);
@@ -2997,7 +3007,7 @@ private:
             return program::ProgramChildRelationOutcome{program::ProgramChildRelationStatus::Refused,
                                                         program::ProgramChildRelationRefusal::Invalid,
                                                         std::nullopt, std::nullopt};
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         impl_->exec("BEGIN IMMEDIATE;");
         try {
             RelationReads reads(*this, owner_scope);
@@ -3252,7 +3262,7 @@ private:
 
     std::optional<HarnessProgramRunRecord> load_wrapper(std::string_view owner_scope,
                                                          std::string_view run_id) const {
-        std::lock_guard lock(impl_->mutex);
+        const auto lock = impl_->enter();
         return load_wrapper_locked(owner_scope, run_id);
     }
 
@@ -3489,28 +3499,36 @@ SqliteHarnessRecordStore::SqliteHarnessRecordStore(const std::string&        db_
 SqliteHarnessRecordStore::SqliteHarnessRecordStore(const std::string&         db_path,
                                                    std::chrono::milliseconds  busy_timeout,
                                                    SqliteHarnessJournalConfig journal_config)
-    : impl_(std::make_shared<Impl>(db_path, busy_timeout, std::move(journal_config))) {}
+    // The last owner of the implementation object (this store or a transition store bound to it) destroys it, unless
+    // the process is a child that inherited it: then nothing is closed and no lock is taken (see
+    // detail::release_if_inherited).
+    : impl_(new Impl(db_path, busy_timeout, std::move(journal_config)),
+            [](Impl* impl) {
+                if (!impl->opened.inherited()) delete impl;
+            }) {}
 
 SqliteHarnessRecordStore::~SqliteHarnessRecordStore() = default;
 
 #ifdef NEOGRAPH_TESTING
 void SqliteHarnessRecordStore::after_next_program_run_read_for_testing(
     std::function<void()> callback) {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->program_run_read_callback = std::move(callback);
 }
 
 void SqliteHarnessRecordStore::fail_next_program_transition_for_testing(
     SqliteHarnessProgramFaultPoint point) {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->program_fault = point;
 }
 
 void SqliteHarnessRecordStore::crash_next_program_transition_for_testing(
     SqliteHarnessProgramFaultPoint point) {
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->program_crash = point;
 }
+
+sqlite3* SqliteHarnessRecordStore::connection_for_testing() const noexcept { return impl_->db; }
 #endif
 
 void SqliteHarnessRecordStore::save_artifact(const std::string& artifact_id, const json& record) {
@@ -3519,7 +3537,7 @@ void SqliteHarnessRecordStore::save_artifact(const std::string& artifact_id, con
         throw std::invalid_argument("Harness artifact record id mismatch");
     }
     const auto      serialized = record.dump();
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement       insert(impl_->db,
                            "INSERT INTO neograph_harness_artifacts "
                                  "(artifact_id, record_json, created_at_ms) VALUES (?, ?, ?) "
@@ -3563,7 +3581,7 @@ void SqliteHarnessRecordStore::save_run(const std::string& run_id, const json& r
         }
     }
     if (!source_checkpoint_id.empty()) validate_id(source_checkpoint_id);
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement       save(
         impl_->db,
         "INSERT INTO neograph_harness_runs "
@@ -3651,7 +3669,7 @@ void SqliteHarnessRecordStore::append_event(const json& event) {
         payload = redacted_json(payload, keys);
     }
 
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->exec("BEGIN IMMEDIATE;");
     try {
         Statement next(impl_->db,
@@ -3709,7 +3727,7 @@ std::vector<json> SqliteHarnessRecordStore::list_events(const std::string& run_i
     if (limit == 0 || limit > 10000 || after_sequence > static_cast<std::size_t>(INT64_MAX)) {
         throw std::invalid_argument("Harness journal pagination is out of range");
     }
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement       list(impl_->db,
                          "SELECT sequence, artifact_id, revision_digest, protocol_version, profile, "
                                "event_type, correlation_id, node_id, worker_id, attempt, payload_json, "
@@ -3758,7 +3776,7 @@ HarnessRetentionResult SqliteHarnessRecordStore::cleanup_retained(
     }
 
     HarnessRetentionResult result;
-    std::lock_guard        lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->exec("BEGIN IMMEDIATE;");
     try {
         const auto count = [&](const char* table, const char* id_column) {
@@ -3897,7 +3915,7 @@ void SqliteHarnessRecordStore::save_contract_run(
     const auto storage_id = program_storage_run_id(run_record.owner_scope(), run_record.run_id());
     const auto serialized = contract_run.serialize_canonical();
 
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     impl_->exec("BEGIN IMMEDIATE;");
     try {
         Statement current(
@@ -4000,7 +4018,7 @@ std::optional<program::ContractRun> SqliteHarnessRecordStore::load_contract_run(
     const program::ProgramRunRecord&     run_record) const {
     (void)contract_manifest_for_artifact(artifact);
     const auto storage_id = program_storage_run_id(run_record.owner_scope(), run_record.run_id());
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement query(
         impl_->db,
         "SELECT owner_scope, artifact_id, bundle_id, program_version_id, manifest_hash, "
@@ -4028,7 +4046,7 @@ std::optional<program::ContractRun> SqliteHarnessRecordStore::load_contract_run(
 std::optional<HarnessProgramRunRecord> SqliteHarnessRecordStore::resolve_program_run(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
-    std::lock_guard lock(impl_->mutex);
+    const auto lock = impl_->enter();
     Statement       query(impl_->db,
                           "SELECT r.record_json, r.artifact_id, a.record_json, r.owner_scope, "
                                 "r.bundle_id, r.program_version_id, r.program_run_id, r.journal_head, "
