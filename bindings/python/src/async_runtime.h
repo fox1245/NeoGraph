@@ -5,6 +5,7 @@
 
 #include "interpreter_exit.h"
 #include "json_bridge.h"
+#include "process_owned.h"
 #include "provider_bridge.h"
 
 #include <asio/executor_work_guard.hpp>
@@ -36,11 +37,16 @@ namespace neograph::pybind {
 // finalizes, which makes it exit by force and crashes the process
 // (interpreter_exit.h). ~AsyncRuntime does the same for a process that never
 // ran the hook, without any Python call.
+//
+// The runtime belongs to the process that started it (process_owned.h). A child
+// made by fork inherits a copy without its worker thread: the child neither
+// joins that thread nor takes a lock of the copy, and the copy is never
+// destroyed; the child starts a runtime of its own the first time it needs one,
+// and its exit hook stops that one.
 class AsyncRuntime {
 public:
     static AsyncRuntime& instance() {
-        static AsyncRuntime r;
-        return r;
+        return owner().get([] { return std::make_unique<AsyncRuntime>(); });
     }
 
     // The executor that drives the runs. Throws once the exit hook has closed
@@ -58,28 +64,23 @@ public:
     // are dropped.
     static void close_if_started() {
         closed().store(true, std::memory_order_release);
-        if (auto* runtime = started().load(std::memory_order_acquire)) runtime->close();
-    }
-
-private:
-    static std::atomic<AsyncRuntime*>& started() {
-        static std::atomic<AsyncRuntime*> pointer{nullptr};
-        return pointer;
-    }
-    static std::atomic<bool>& closed() {
-        static std::atomic<bool> flag{false};
-        return flag;
+        if (auto* runtime = owner().current()) runtime->close();
     }
 
     AsyncRuntime()
         : guard_(asio::make_work_guard(io_)),
-          worker_([this]() { io_.run(); }) {
-        started().store(this, std::memory_order_release);
-    }
+          worker_([this]() { io_.run(); }) {}
 
-    ~AsyncRuntime() {
-        started().store(nullptr, std::memory_order_release);
-        close();
+    ~AsyncRuntime() { close(); }
+
+private:
+    static ProcessOwned<AsyncRuntime>& owner() {
+        static ProcessOwned<AsyncRuntime> runtime;
+        return runtime;
+    }
+    static std::atomic<bool>& closed() {
+        static std::atomic<bool> flag{false};
+        return flag;
     }
 
     void close() {

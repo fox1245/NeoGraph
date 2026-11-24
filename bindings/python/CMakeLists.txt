@@ -124,6 +124,8 @@ endif()
 target_link_libraries(_neograph PRIVATE
     neograph::core
 )
+# Internal core headers the binding uses (the process generation: a child made by fork is told from its parent).
+target_include_directories(_neograph PRIVATE "${PROJECT_SOURCE_DIR}/src")
 # The closed-descriptor SchemaProvider implementation lives in neograph::llm.
 # Core typed request/outcome values remain available without the LLM target.
 if(TARGET neograph::llm)
@@ -261,4 +263,34 @@ if(Python3_Interpreter_FOUND AND NEOGRAPH_BUILD_TESTS)
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
     set_tests_properties(pybind_smoke PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
+
+    # The interpreter's exit, alone and quickly: the exit hook of the binding in a process that exits cleanly, and in
+    # a child made by fork. A hung child is ended by the TIMEOUT (the tests wait for no time themselves), so each case
+    # of the fork file is a test of its own and a hang in one does not hide the others.
+    add_test(NAME pybind_interpreter_exit
+        COMMAND "${Python3_EXECUTABLE}" -m pytest -q
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interpreter_exit.py"
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set_tests_properties(pybind_interpreter_exit PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}"
+        LABELS "pybind;fork"
+        TIMEOUT 240)
+    foreach(_fork_case
+            after_work:exits_normally_after_the_binding_ran_work
+            node_attempt:exit_hook_of_a_child_made_while_a_node_attempt_runs
+            own_work:runs_work_of_its_own_after_the_fork
+            no_prior_work:started_no_thread_before_the_fork)
+        string(REPLACE ":" ";" _fork_case_parts "${_fork_case}")
+        list(GET _fork_case_parts 0 _fork_case_name)
+        list(GET _fork_case_parts 1 _fork_case_selector)
+        add_test(NAME pybind_fork_${_fork_case_name}
+            COMMAND "${Python3_EXECUTABLE}" -m pytest -q
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interpreter_fork.py"
+                    -k "${_fork_case_selector}"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+        set_tests_properties(pybind_fork_${_fork_case_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}"
+            LABELS "pybind;fork"
+            TIMEOUT 60)
+    endforeach()
 endif()
