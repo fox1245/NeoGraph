@@ -19,6 +19,8 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/tool_dispatch.h>
+#include <neograph/graph/types.h>
+#include <neograph/tool_execution.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -32,7 +34,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 #include <string>
 #include <thread>
@@ -1176,5 +1180,161 @@ TEST(MCPClientAsync, AcceptsOnlyKnownProtocolRevisions) {
         std::lock_guard lock(mu);
         ASSERT_GE(versions_sent.size(), 3u);
         EXPECT_EQ(versions_sent.back(), answer);
+    }
+}
+
+namespace {
+
+// A server with one tool whose tools/call answer is scripted by the call's
+// arguments: {"error": {...}} answers with that JSON-RPC error, and
+// {"result": {...}} with that result.
+struct ScriptedToolServer {
+    httplib::Server svr;
+    std::unique_ptr<ServerGuard> guard;
+
+    ScriptedToolServer() {
+        svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
+            const auto request = json::parse(req.body);
+            const auto method  = request.value("method", "");
+            if (method == "notifications/initialized") {
+                res.status = 202;
+                return;
+            }
+            json envelope{{"jsonrpc", "2.0"}, {"id", request.at("id")}};
+            if (method == "initialize") {
+                envelope["result"] = {{"protocolVersion", "2025-11-25"},
+                                      {"capabilities", {{"tools", json::object()}}},
+                                      {"serverInfo", {{"name", "scripted"}, {"version", "1"}}}};
+            } else if (method == "tools/list") {
+                envelope["result"] = {{"tools", json::array({{{"name", "probe"},
+                                                               {"inputSchema", {{"type", "object"}}}}})}};
+            } else {
+                const auto arguments = request.at("params").at("arguments");
+                if (arguments.contains("error")) envelope["error"] = arguments.at("error");
+                else envelope["result"] = arguments.at("result");
+            }
+            res.set_content(envelope.dump(), "application/json");
+        });
+        guard = std::make_unique<ServerGuard>(svr);
+    }
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(guard->port) + "/mcp"; }
+};
+
+}  // namespace
+
+// A JSON-RPC error that refuses a request (parse error, invalid request,
+// method not found, invalid params) says the tool did not run: the exception
+// stays an MCPError with its code and data, and is also a ToolRequestRefusal
+// that is never retryable. The other codes can arrive after the tool started
+// and stay plain MCPErrors. The two run control codes (-32010 hook blocked,
+// -32011 interrupted) are neither: the client reports them as an ordinary,
+// not retried failure that carries the remote's stable failure code.
+TEST(MCPClientAsync, JsonRpcRefusalCodesMarkACallAsNotRun) {
+    ScriptedToolServer server;
+    mcp::MCPClient client(server.url());
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    auto* tool = tools.front().get();
+    const std::vector<std::pair<int, bool>> table{
+        {-32700, true},  {-32600, true},  {-32601, true},  {-32602, true},
+        {-32603, false}, {-32000, false}, {-32001, false}, {-32099, false},
+        {1, false},
+    };
+    const auto raise = [&](int code) {
+        const json arguments{{"error", {{"code", code},
+                                        {"message", "scripted"},
+                                        {"data", {{"code", "scripted.data"}}}}}};
+        (void)async::run_sync(tool->execute_async(arguments));
+    };
+    for (const auto& [code, refused] : table) {
+        SCOPED_TRACE(code);
+        try {
+            raise(code);
+            ADD_FAILURE() << "the error was not raised";
+        } catch (const mcp::MCPError& error) {
+            EXPECT_EQ(error.code(), code);
+            EXPECT_EQ(error.data().value("code", ""), "scripted.data");
+            const auto* refusal = dynamic_cast<const ToolRequestRefusal*>(&error);
+            EXPECT_EQ(refusal != nullptr, refused);
+            if (refusal) EXPECT_FALSE(refusal->retryable());
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "not an MCPError: " << error.what();
+        }
+    }
+    for (const auto& [code, stable] : std::vector<std::pair<int, std::string>>{
+             {-32010, "NG.HookBlocked"}, {-32011, "NG.Interrupted"}}) {
+        SCOPED_TRACE(code);
+        try {
+            raise(code);
+            ADD_FAILURE() << "the error was not raised";
+        } catch (const mcp::MCPError& error) {
+            ADD_FAILURE() << "run control codes are not MCPErrors: " << error.what();
+        } catch (const std::exception& error) {
+            EXPECT_EQ(dynamic_cast<const ToolRequestRefusal*>(&error), nullptr);
+            const auto verdict = graph::classify_failure(std::current_exception());
+            EXPECT_EQ(verdict.failure_class, graph::NodeFailureClass::Ordinary);
+            EXPECT_EQ(verdict.code, stable);
+            EXPECT_FALSE(verdict.retryable);
+        }
+    }
+}
+
+// An isError result carries a refusal only through the marker
+// `_meta["io.neograph/failure"].code == "NG.InvalidRequest"`; its `retryable`
+// flag is the refusal's. Any other isError result is a plain failure whose
+// effect is unknown.
+TEST(MCPClientAsync, InvalidRequestMarkerOnAnErrorResultMarksACallAsNotRun) {
+    ScriptedToolServer server;
+    mcp::MCPClient client(server.url());
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    auto* tool = tools.front().get();
+    const auto error_result = [](json meta) {
+        json result{{"isError", true},
+                    {"content", json::array({{{"type", "text"}, {"text", "refused text"}}})}};
+        if (!meta.is_null()) result["_meta"] = std::move(meta);
+        return json{{"result", std::move(result)}};
+    };
+    const auto marker = [](const char* code, json retryable) {
+        json failure{{"code", code}};
+        if (!retryable.is_null()) failure["retryable"] = std::move(retryable);
+        return json{{"io.neograph/failure", std::move(failure)}};
+    };
+    struct Case {
+        const char* name;
+        json        arguments;
+        bool        refused;
+        bool        retryable;
+    };
+    const std::vector<Case> table{
+        {"marker, not retryable", error_result(marker("NG.InvalidRequest", false)), true, false},
+        {"marker, retryable", error_result(marker("NG.InvalidRequest", true)), true, true},
+        {"marker without a flag", error_result(marker("NG.InvalidRequest", nullptr)), true, false},
+        {"marker with a flag that is not a boolean",
+         error_result(marker("NG.InvalidRequest", "yes")), true, false},
+        {"another failure code", error_result(marker("NG.TaskFailed", true)), false, false},
+        {"no marker", error_result(nullptr), false, false},
+        {"marker on a success result",
+         json{{"result", {{"content", json::array({{{"type", "text"}, {"text", "fine"}}})},
+                          {"_meta", marker("NG.InvalidRequest", false)}}}},
+         false, false},
+    };
+    for (const auto& item : table) {
+        SCOPED_TRACE(item.name);
+        try {
+            const auto text = async::run_sync(tool->execute_async(item.arguments));
+            EXPECT_EQ(text, "fine") << "only the success result returns";
+            EXPECT_EQ(std::string(item.name), "marker on a success result");
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("MCP tool execution error: refused text"),
+                      std::string::npos)
+                << error.what();
+            const auto* refusal = dynamic_cast<const ToolRequestRefusal*>(&error);
+            EXPECT_EQ(refusal != nullptr, item.refused);
+            if (refusal) EXPECT_EQ(refusal->retryable(), item.retryable);
+            EXPECT_EQ(dynamic_cast<const mcp::MCPError*>(&error), nullptr)
+                << "a failed result is not a JSON-RPC error";
+        }
     }
 }

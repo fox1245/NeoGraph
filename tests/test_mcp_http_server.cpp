@@ -1,5 +1,8 @@
 #include <neograph/mcp/http_server.h>
 
+#include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
+
 #include <gtest/gtest.h>
 #ifdef NEOGRAPH_TESTS_HAVE_MCP_CLIENT
 #include <neograph/async/run_sync.h>
@@ -26,6 +29,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -1365,6 +1369,379 @@ TEST(MCPHttpServerTest, StaticBearerTokensPublishNoMetadata) {
     auto missing = client.Post("/mcp", base_headers(), request(1, "ping").dump(), "application/json");
     ASSERT_TRUE(missing);
     EXPECT_EQ(missing->get_header_value("WWW-Authenticate"), "Bearer");
+}
+
+// What an HTTP client reads when a handler fails. A run control signal is a
+// JSON-RPC error inside an HTTP 200 answer, with its own code and data; every
+// other failure is an isError tool result with the stable failure code. The
+// handler's exception text never crosses the wire.
+std::unique_ptr<MCPServer> make_failing_server() {
+    MCPServerConfig config;
+    config.server_info = {{"name", "failing"}, {"version", "1"}};
+    auto server        = std::make_unique<MCPServer>(std::move(config));
+    ToolDefinition fail;
+    fail.name         = "fail";
+    fail.input_schema = {{"type", "object"},
+                         {"required", json::array({"kind"})},
+                         {"properties", {{"kind", {{"type", "string"}}}}}};
+    server->register_tool(std::move(fail), [](const json& arguments, const auto&) -> CallToolResult {
+        const auto kind = arguments.at("kind").get<std::string>();
+        if (kind == "hook")
+            throw neograph::HookBoundaryBlocked("sha256:" + std::string(64, 'e'),
+                                                neograph::HookExecutionState::Failed,
+                                                "private hook detail");
+        if (kind == "interrupt")
+            throw neograph::graph::NodeInterrupt("needs approval", json{{"cmd", "deploy"}});
+        throw std::runtime_error("private handler detail");
+    });
+    return server;
+}
+
+json call_over_http(httplib::Client& client, const std::string& session_id, json id, json params,
+                    int* status = nullptr) {
+    auto response = client.Post("/mcp", session_headers(session_id),
+                                request(std::move(id), "tools/call", std::move(params)).dump(),
+                                "application/json");
+    if (!response) return nullptr;
+    if (status) *status = response->status;
+    EXPECT_EQ(response->get_header_value("Content-Type").rfind("application/json", 0), 0u);
+    return json::parse(response->body);
+}
+
+TEST(MCPHttpServerTest, HandlerFailuresReachAnHttpClientWithTheirStableShapes) {
+    MCPHttpServer server([](std::string_view) {
+        return MCPHttpServerSession{make_failing_server(), {}};
+    });
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto      session = open_session(client);
+    ASSERT_FALSE(session.empty());
+
+    int  status = 0;
+    auto hook   = call_over_http(client, session, 1, {{"name", "fail"}, {"arguments", {{"kind", "hook"}}}},
+                                 &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(hook.contains("error")) << hook.dump();
+    EXPECT_EQ(hook["id"], 1);
+    EXPECT_EQ(hook["error"]["code"], -32010);
+    EXPECT_EQ(hook["error"]["data"]["code"], "NG.HookBlocked");
+    EXPECT_EQ(hook["error"]["data"]["invocation_id"], "sha256:" + std::string(64, 'e'));
+    EXPECT_EQ(hook["error"]["data"]["state"], "failed");
+    EXPECT_EQ(hook.dump().find("private hook detail"), std::string::npos) << hook.dump();
+
+    auto interrupt = call_over_http(client, session, 2,
+                                    {{"name", "fail"}, {"arguments", {{"kind", "interrupt"}}}}, &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(interrupt.contains("error")) << interrupt.dump();
+    EXPECT_EQ(interrupt["error"]["code"], -32011);
+    EXPECT_EQ(interrupt["error"]["data"]["code"], "NG.Interrupted");
+    EXPECT_EQ(interrupt["error"]["data"]["reason"], "needs approval");
+    EXPECT_EQ(interrupt["error"]["data"]["value"]["cmd"], "deploy");
+
+    auto plain = call_over_http(client, session, 3,
+                                {{"name", "fail"}, {"arguments", {{"kind", "plain"}}}}, &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(plain.contains("result")) << plain.dump();
+    EXPECT_TRUE(plain["result"]["isError"].get<bool>());
+    const auto failure = plain["result"]["_meta"]["io.neograph/failure"];
+    EXPECT_EQ(failure["code"], "NG.TaskFailed");
+    EXPECT_TRUE(failure["retryable"].get<bool>());
+    EXPECT_EQ(failure["retryable_by_class"], failure["retryable"]);
+    EXPECT_EQ(plain.dump().find("private handler detail"), std::string::npos) << plain.dump();
+
+    // Arguments that fail the input schema never reach the handler: an isError
+    // result with the marker that tells a NeoGraph client nothing ran.
+    auto refused = call_over_http(client, session, 4,
+                                  {{"name", "fail"}, {"arguments", {{"kind", 3}}}}, &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(refused.contains("result")) << refused.dump();
+    EXPECT_TRUE(refused["result"]["isError"].get<bool>());
+    const auto marker = refused["result"]["_meta"]["io.neograph/failure"];
+    EXPECT_EQ(marker["code"], "NG.InvalidRequest");
+    EXPECT_FALSE(marker["retryable"].get<bool>());
+    EXPECT_FALSE(marker["retryable_by_class"].get<bool>());
+
+    // An unknown tool and malformed parameters are protocol errors.
+    auto unknown = call_over_http(client, session, 5, {{"name", "nothing"}, {"arguments", json::object()}},
+                                  &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(unknown.contains("error")) << unknown.dump();
+    EXPECT_EQ(unknown["error"]["code"], -32602);
+    EXPECT_EQ(unknown["error"]["data"]["code"], "NG.ToolNotFound");
+    auto malformed = call_over_http(client, session, 6, json::object(), &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(malformed.contains("error")) << malformed.dump();
+    EXPECT_EQ(malformed["error"]["code"], -32602);
+}
+
+// A tool call that finds every worker and queue slot taken is refused at once
+// with -32000 and the capacity, as an answer of its own POST; the call that
+// holds the slot is answered normally.
+TEST(MCPHttpServerTest, AFullToolQueueAnswersTheExcessCallWithItsCapacity) {
+    struct Gate {
+        std::promise<void>       entered;
+        std::promise<void>       release;
+        std::shared_future<void> released = release.get_future().share();
+        std::atomic<int>         handler_runs{0};
+    };
+    auto          gate = std::make_shared<Gate>();
+    MCPHttpServer server([gate](std::string_view) {
+        MCPServerConfig config;
+        config.server_info          = {{"name", "queue-full"}, {"version", "1"}};
+        config.max_concurrent_calls = 1;
+        config.max_pending_calls    = 0;
+        auto session                = std::make_unique<MCPServer>(std::move(config));
+        ToolDefinition block;
+        block.name         = "block";
+        block.input_schema = {{"type", "object"}};
+        session->register_tool(std::move(block), [gate](const json&, const auto&) {
+            if (gate->handler_runs.fetch_add(1) == 0) gate->entered.set_value();
+            gate->released.wait();
+            CallToolResult result;
+            result.content = json::array({{{"type", "text"}, {"text", "released"}}});
+            return result;
+        });
+        return MCPHttpServerSession{std::move(session), gate};
+    });
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client holder("127.0.0.1", server.port());
+    httplib::Client excess("127.0.0.1", server.port());
+    const auto      session = open_session(holder);
+    ASSERT_FALSE(session.empty());
+
+    auto first = std::async(std::launch::async, [&] {
+        return call_over_http(holder, session, "first", {{"name", "block"}, {"arguments", json::object()}});
+    });
+    ASSERT_EQ(gate->entered.get_future().wait_for(10s), std::future_status::ready);
+
+    int  status  = 0;
+    auto refused = call_over_http(excess, session, "second",
+                                  {{"name", "block"}, {"arguments", json::object()}}, &status);
+    EXPECT_EQ(status, 200);
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused["id"], "second");
+    EXPECT_EQ(refused["error"]["code"], -32000);
+    EXPECT_EQ(refused["error"]["message"], "MCP tool queue is full");
+    EXPECT_EQ(refused["error"]["data"]["capacity"], 1);
+
+    gate->release.set_value();
+    const auto answered = first.get();
+    ASSERT_TRUE(answered.contains("result")) << answered.dump();
+    EXPECT_EQ(answered["result"]["content"][0]["text"], "released");
+    EXPECT_EQ(gate->handler_runs.load(), 1) << "the refused call never ran";
+}
+
+// The server factory receives the scope the bearer authorizer returned, once
+// per new session; a loopback bind without an authorizer passes the empty
+// scope. Every session gets its own server from the factory.
+TEST(MCPHttpServerTest, TheFactoryReceivesTheAuthorizersScopeForEachNewSession) {
+    std::mutex               mutex;
+    std::vector<std::string> scopes;
+    auto                     factory = [&](std::string_view scope) {
+        std::lock_guard lock(mutex);
+        scopes.emplace_back(scope);
+        MCPServerConfig config;
+        config.server_info = {{"name", "tenant-" + std::string(scope) + "-" +
+                                           std::to_string(scopes.size())},
+                              {"version", "1"}};
+        return MCPHttpServerSession{std::make_unique<MCPServer>(std::move(config)), {}};
+    };
+    const auto initialize = [](httplib::Client& client, const std::string& token) {
+        auto headers = base_headers();
+        if (!token.empty()) headers.emplace("Authorization", "Bearer " + token);
+        auto response = client.Post(
+            "/mcp", headers,
+            request(1, "initialize", {{"protocolVersion", "2025-11-25"},
+                                      {"capabilities", json::object()},
+                                      {"clientInfo", {{"name", "scope-test"}, {"version", "1"}}}})
+                .dump(),
+            "application/json");
+        return response;
+    };
+    {
+        MCPHttpServerConfig config;
+        config.bearer_authorizer = [](std::string_view token) -> std::optional<std::string> {
+            if (token == "token-a" || token == "token-a2") return "principal-a";
+            if (token == "token-b") return "principal-b";
+            return std::nullopt;
+        };
+        MCPHttpServer server(factory, std::move(config));
+        ASSERT_TRUE(server.start_async());
+        HttpServerGuard guard(server);
+        httplib::Client client("127.0.0.1", server.port());
+        std::vector<std::string> names;
+        for (const char* token : {"token-a", "token-b", "token-a2"}) {
+            auto response = initialize(client, token);
+            ASSERT_TRUE(response) << token;
+            ASSERT_EQ(response->status, 200) << token;
+            names.push_back(json::parse(response->body)["result"]["serverInfo"]["name"]
+                                .get<std::string>());
+        }
+        EXPECT_EQ(names, (std::vector<std::string>{"tenant-principal-a-1", "tenant-principal-b-2",
+                                                   "tenant-principal-a-3"}));
+        std::lock_guard lock(mutex);
+        EXPECT_EQ(scopes, (std::vector<std::string>{"principal-a", "principal-b", "principal-a"}));
+    }
+    {
+        MCPHttpServer server(factory);
+        ASSERT_TRUE(server.start_async());
+        HttpServerGuard guard(server);
+        httplib::Client client("127.0.0.1", server.port());
+        auto response = initialize(client, {});
+        ASSERT_TRUE(response);
+        EXPECT_EQ(response->status, 200);
+        std::lock_guard lock(mutex);
+        ASSERT_EQ(scopes.size(), 4u);
+        EXPECT_EQ(scopes.back(), "");
+    }
+}
+
+// How a bearer header is turned into an answer, for the static-token case
+// that publishes no OAuth metadata.
+TEST(MCPHttpServerTest, BearerHeadersAreAnsweredWithTheirOwnStatusAndCode) {
+    std::atomic<bool> authorizer_throws{false};
+    MCPHttpServerConfig config;
+    config.bearer_authorizer = [&](std::string_view token) -> std::optional<std::string> {
+        if (authorizer_throws.load()) throw std::runtime_error("backend down");
+        if (token == "good") return "principal";
+        if (token == "empty-scope") return std::string();
+        return std::nullopt;
+    };
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto      initialize = request(1, "initialize",
+                                         {{"protocolVersion", "2025-11-25"},
+                                          {"capabilities", json::object()},
+                                          {"clientInfo", {{"name", "bearer"}, {"version", "1"}}}})
+                                     .dump();
+    const auto post = [&](const std::string& authorization) {
+        auto headers = base_headers();
+        if (!authorization.empty()) headers.emplace("Authorization", authorization);
+        return client.Post("/mcp", headers, initialize, "application/json");
+    };
+    struct Case {
+        std::string authorization;
+        int         status;
+        int         code;
+        std::string challenge;
+    };
+    const std::vector<Case> table{
+        {"", 401, -32001, "Bearer"},
+        {"Bearer", 401, -32001, "Bearer"},
+        {"Basic Z29vZDpiYWQ=", 401, -32001, "Bearer"},
+        {"bearer good", 401, -32001, "Bearer"},
+        {"Bearer unknown", 401, -32001, "Bearer error=\"invalid_token\""},
+        {"Bearer empty-scope", 401, -32001, "Bearer error=\"invalid_token\""},
+    };
+    for (const auto& item : table) {
+        SCOPED_TRACE(item.authorization);
+        auto response = post(item.authorization);
+        ASSERT_TRUE(response);
+        EXPECT_EQ(response->status, item.status);
+        EXPECT_EQ(json::parse(response->body)["error"]["code"], item.code);
+        EXPECT_EQ(response->get_header_value("WWW-Authenticate"), item.challenge);
+    }
+    auto accepted = post("Bearer good");
+    ASSERT_TRUE(accepted);
+    EXPECT_EQ(accepted->status, 200);
+
+    authorizer_throws = true;
+    auto unavailable  = post("Bearer good");
+    ASSERT_TRUE(unavailable);
+    EXPECT_EQ(unavailable->status, 503);
+    EXPECT_EQ(json::parse(unavailable->body)["error"]["code"], -32000);
+    EXPECT_EQ(unavailable->body.find("backend down"), std::string::npos) << unavailable->body;
+}
+
+// GET is declined with 405 and `Allow`, whatever the session or bearer state:
+// the answer is given after the Host and Origin checks and before any
+// authorization.
+TEST(MCPHttpServerTest, GetIsDeclinedWith405BeforeAnyAuthorization) {
+    MCPHttpServerConfig config;
+    config.bearer_authorizer = [](std::string_view) -> std::optional<std::string> {
+        return std::nullopt;
+    };
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    for (const auto& session_id : {std::string(), std::string("unknown-session")}) {
+        SCOPED_TRACE(session_id);
+        httplib::Headers headers = {{"Accept", "text/event-stream"}};
+        if (!session_id.empty()) headers.emplace("Mcp-Session-Id", session_id);
+        auto get = client.Get("/mcp", headers);
+        ASSERT_TRUE(get);
+        EXPECT_EQ(get->status, 405);
+        EXPECT_EQ(get->get_header_value("Allow"), "POST, DELETE");
+    }
+    const httplib::Headers foreign_headers = {{"Accept", "text/event-stream"},
+                                              {"Origin", "https://attacker.example"}};
+    auto foreign = client.Get("/mcp", foreign_headers);
+    ASSERT_TRUE(foreign);
+    EXPECT_EQ(foreign->status, 403);
+    // The same request without a token is 401 on POST.
+    auto post = client.Post("/mcp", base_headers(), request(1, "ping").dump(), "application/json");
+    ASSERT_TRUE(post);
+    EXPECT_EQ(post->status, 401);
+}
+
+// A client that negotiates 2024-11-05 is served over Streamable HTTP, with or
+// without the MCP-Protocol-Version header. This changes with the server's
+// transport implementation: the 2024-11-05 revision defines stdio and the
+// older HTTP+SSE transport, not Streamable HTTP, so a server whose HTTP
+// transport starts at 2025-03-26 answers such a client with an error.
+TEST(MCPHttpServerTest, A20241105ClientIsServedOverStreamableHttp) {
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    auto initialize = client.Post(
+        "/mcp", base_headers(),
+        request(1, "initialize", {{"protocolVersion", "2024-11-05"},
+                                  {"capabilities", json::object()},
+                                  {"clientInfo", {{"name", "old-revision"}, {"version", "1"}}}})
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(initialize);
+    ASSERT_EQ(initialize->status, 200);
+    EXPECT_EQ(json::parse(initialize->body)["result"]["protocolVersion"], "2024-11-05");
+    const auto id = initialize->get_header_value("Mcp-Session-Id");
+    ASSERT_FALSE(id.empty());
+
+    auto initialized_headers = base_headers();
+    initialized_headers.emplace("Mcp-Session-Id", id);
+    initialized_headers.emplace("MCP-Protocol-Version", "2024-11-05");
+    auto initialized = client.Post(
+        "/mcp", initialized_headers,
+        json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump(), "application/json");
+    ASSERT_TRUE(initialized);
+    EXPECT_EQ(initialized->status, 202);
+    for (const bool with_header : {true, false}) {
+        SCOPED_TRACE(with_header);
+        auto headers = base_headers();
+        headers.emplace("Mcp-Session-Id", id);
+        if (with_header) headers.emplace("MCP-Protocol-Version", "2024-11-05");
+        auto listed = client.Post("/mcp", headers, request(2, "tools/list").dump(), "application/json");
+        ASSERT_TRUE(listed);
+        ASSERT_EQ(listed->status, 200);
+        EXPECT_EQ(json::parse(listed->body)["result"]["tools"][0]["name"], "echo");
+        auto called = client.Post(
+            "/mcp", headers,
+            request(3, "tools/call", {{"name", "echo"}, {"arguments", {{"value", "old"}}}}).dump(),
+            "application/json");
+        ASSERT_TRUE(called);
+        ASSERT_EQ(called->status, 200);
+        EXPECT_EQ(json::parse(called->body)["result"]["content"][0]["text"], "old");
+    }
+    auto removed = client.Delete("/mcp", session_headers(id));
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->status, 204);
 }
 
 }  // namespace
