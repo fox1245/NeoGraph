@@ -5,7 +5,7 @@
 
 #include "interpreter_exit.h"
 #include "json_bridge.h"
-#include "process_owned.h"
+#include "core/process_owned.h"
 #include "provider_bridge.h"
 
 #include <asio/executor_work_guard.hpp>
@@ -38,7 +38,7 @@ namespace neograph::pybind {
 // (interpreter_exit.h). ~AsyncRuntime does the same for a process that never
 // ran the hook, without any Python call.
 //
-// The runtime belongs to the process that started it (process_owned.h). A child
+// The runtime belongs to the process that started it (core/process_owned.h). A child
 // made by fork inherits a copy without its worker thread: the child neither
 // joins that thread nor takes a lock of the copy, and the copy is never
 // destroyed; the child starts a runtime of its own the first time it needs one,
@@ -74,8 +74,8 @@ public:
     ~AsyncRuntime() { close(); }
 
 private:
-    static ProcessOwned<AsyncRuntime>& owner() {
-        static ProcessOwned<AsyncRuntime> runtime;
+    static neograph::detail::ProcessOwned<AsyncRuntime>& owner() {
+        static neograph::detail::ProcessOwned<AsyncRuntime> runtime;
         return runtime;
     }
     static std::atomic<bool>& closed() {

@@ -28,7 +28,7 @@
 #include "json_bridge.h"
 #include "node_failure_bridge.h"
 #include "opaque_types.h"
-#include "process_owned.h"
+#include "core/process_owned.h"
 #include "provider_bridge.h"
 
 #include <neograph/graph/engine.h>
@@ -315,16 +315,16 @@ PythonToolControlSignal translate_tool_control_signal(py::error_already_set& e) 
 // after that nothing is offloaded to them: the body runs on the calling thread,
 // as it does for a tool that is not an AsyncTool.
 //
-// A pool belongs to the process that started it (process_owned.h). A child made
+// A pool belongs to the process that started it (core/process_owned.h). A child made
 // by fork inherits a copy without its threads: the child neither joins them nor
 // destroys the copy, and starts a pool of its own the first time it offloads a
 // body. Its exit hook stops that one.
-ProcessOwned<asio::thread_pool>& async_tool_pool_owner() {
-    static ProcessOwned<asio::thread_pool> owner;
+neograph::detail::ProcessOwned<asio::thread_pool>& async_tool_pool_owner() {
+    static neograph::detail::ProcessOwned<asio::thread_pool> owner;
     return owner;
 }
-ProcessOwned<asio::thread_pool>& python_node_pool_owner() {
-    static ProcessOwned<asio::thread_pool> owner;
+neograph::detail::ProcessOwned<asio::thread_pool>& python_node_pool_owner() {
+    static neograph::detail::ProcessOwned<asio::thread_pool> owner;
     return owner;
 }
 std::atomic<bool>& worker_pools_are_closed() {
