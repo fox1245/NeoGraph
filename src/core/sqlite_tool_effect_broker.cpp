@@ -264,6 +264,11 @@ asio::awaitable<ToolExecutionResult> SQLiteToolEffectBroker::execute(
         // every broker (tool_effect_broker.h). Should the withdrawal fail, the
         // marker stays and a later attempt asks for reconciliation: safe,
         // only conservative.
+        //
+        // A child made by fork can reach this point: a tool forked while it ran and the child returned into the call. The
+        // call is the parent's, so the copy must neither withdraw its marker nor report it withdrawn. The check is
+        // outside the try below, whose handler would swallow the typed error.
+        impl_->opened.check("SQLiteToolEffectBroker");
         try {
             std::lock_guard lock(impl_->mutex);
             Transaction tx(impl_->db);
@@ -281,6 +286,9 @@ asio::awaitable<ToolExecutionResult> SQLiteToolEffectBroker::execute(
     if (!result.succeeded() || result.effect_uncertain)
         co_return refusal(ToolTerminalStatus::ReconciliationRequired,
                          "Tool effect outcome after dispatch is unconfirmed");
+    // The same for the settle: a child that a tool made while it ran must not write the parent's receipt, and the check
+    // is outside the try below, whose handler would turn the typed error into a result.
+    impl_->opened.check("SQLiteToolEffectBroker");
     try {
         std::lock_guard lock(impl_->mutex);
         Transaction tx(impl_->db);

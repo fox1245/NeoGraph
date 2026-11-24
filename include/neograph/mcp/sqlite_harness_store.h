@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
+#include <neograph/store_opened_in_another_process.h>
 
 #include <chrono>
 #include <cstdint>
@@ -15,6 +16,10 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+#ifdef NEOGRAPH_TESTING
+struct sqlite3;
+#endif
 
 namespace neograph::mcp {
 
@@ -50,7 +55,15 @@ enum class SqliteHarnessProgramFaultPoint : std::uint8_t {
     BeforeCommit,
 };
 
-/** Local SQLite implementation of Harness snapshots and the causal journal. */
+/**
+ * Local SQLite implementation of Harness snapshots and the causal journal.
+ *
+ * A child made by fork opens a store of its own: the copy it inherited refuses every operation with
+ * StoreOpenedInAnotherProcess, and destroying the copy leaves the parent's connection alone. The Program transition
+ * store that bind_program_transitions() returns shares the connection of the store it came from, so it behaves the
+ * same: its operations, synchronous and awaitable, are refused in the child, and the connection is released only by
+ * the process that opened it, whichever of the two is destroyed last.
+ */
 class SqliteHarnessProgramTransitionStore;
 class NEOGRAPH_API SqliteHarnessRecordStore final : public HarnessRecordStore,
                                                     public HarnessJournal,
@@ -99,6 +112,8 @@ public:
     /// Crash the current process once at the requested transition point.
     /// This is test-only and is used to prove reconnect recovery after SIGKILL.
     void crash_next_program_transition_for_testing(SqliteHarnessProgramFaultPoint point);
+    /// The store's database connection, for tests that watch what the store does with it.
+    sqlite3* connection_for_testing() const noexcept;
 #endif
     std::optional<HarnessProgramRunRecord>
     resolve_program_run(std::string_view owner_scope, std::string_view run_id) const override;

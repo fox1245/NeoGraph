@@ -16,6 +16,7 @@
 #include <neograph/graph/configuration_failure.h>
 #include <neograph/hook.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/host_admission.h>
 #include <neograph/research/sqlite_evidence_ledger.h>
 #include <neograph/runtime_context.h>
 #include <neograph/sqlite_runtime_stores.h>
@@ -24,6 +25,15 @@
 #include <neograph/tool_execution.h>
 #if defined(NEOGRAPH_STORE_FORK_TESTS_HAVE_PROGRAM_SQLITE)
 #include <neograph/program/sqlite_core_tool_grant_store.h>
+#endif
+#if defined(NEOGRAPH_STORE_FORK_TESTS_HAVE_HARNESS)
+#include <neograph/mcp/harness.h>
+#include <neograph/mcp/harness_program_store.h>
+#include <neograph/mcp/sqlite_harness_store.h>
+#include <neograph/program/contract.h>
+#include <neograph/program/registry.h>
+#include <neograph/program/replay.h>
+#include <neograph/program/transition_store.h>
 #endif
 
 #include <gtest/gtest.h>
@@ -418,6 +428,18 @@ public:
     std::atomic<int> runs{0};
 };
 
+// The policy of a tool that writes, as a broker needs it: native asynchronous execution, no retry within a slot.
+std::shared_ptr<ToolExecutionController> write_tool_controller() {
+    auto                policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::NativeAsync;
+    policy.effect         = ToolEffectClass::ExternalWrite;
+    policy.idempotency    = ToolIdempotency::NonIdempotent;
+    policies->upsert("write", policy);
+    return std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>(), nullptr});
+}
+
 class ToolEffectBrokerOwner {
 public:
     static constexpr const char* kName = "ToolEffectBroker";
@@ -444,15 +466,7 @@ public:
     }
 
 private:
-    static std::shared_ptr<ToolExecutionController> make_controller() {
-        auto                policies = std::make_shared<ToolExecutionPolicyRegistry>();
-        ToolExecutionPolicy policy;
-        policy.effect      = ToolEffectClass::ExternalWrite;
-        policy.idempotency = ToolIdempotency::NonIdempotent;
-        policies->upsert("write", policy);
-        return std::make_shared<ToolExecutionController>(
-            ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>(), nullptr});
-    }
+    static std::shared_ptr<ToolExecutionController> make_controller() { return write_tool_controller(); }
     ToolExecutionResult execute(const std::string& run) {
         ToolEffectIdentity identity;
         identity.owner_scope  = "tenant";
@@ -526,6 +540,398 @@ private:
 };
 #endif
 
+#if defined(NEOGRAPH_STORE_FORK_TESTS_HAVE_HARNESS)
+// The Harness record store and the Program transition store it hands out share one implementation object (one
+// connection, one lock). The fixture below is the smallest one that persists an adapter artifact, publishes a run and
+// binds a transition store; its builders follow those of test_harness_program_store.cpp.
+namespace harness_world {
+using namespace neograph::mcp;
+using namespace neograph::program;
+
+constexpr const char* kRun = "run-one";
+
+std::string digest(char value) { return "sha256:" + std::string(64, value); }
+
+RunBudget budget() { return {1000, 100, 100, 1, 10, 100, 1, 1, 1}; }
+
+RegistrySnapshot registry() {
+    RegistrySnapshotBuilder builder;
+    builder.add_reducer(
+        ExecutableManifest{{ExecutableKind::Reducer, "persist-reducer", "1.0.0", digest('8')},
+                           EffectMode::Brokered,
+                           "attestation:test",
+                           {},
+                           {}},
+        [](const json&, const json& incoming) { return json(incoming); });
+    return std::move(builder).build();
+}
+
+ProgramBundle bundle(const RegistrySnapshot& registry) {
+    const json definition = {{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                             {"nodes", json{{"main", json{{"type", "persist-node"}}}}}};
+    ProgramBundleData data;
+    data.source_kind                   = SourceKind::CppBuilder;
+    data.source_hash                   = digest('1');
+    data.canonical_program_hash        = digest('2');
+    data.compiler_build_id             = "persist-compiler/v1";
+    data.program_schema_version        = 1;
+    data.registry_snapshot_fingerprint = registry.fingerprint();
+    data.module_dependency_merkle_root = digest('3');
+    data.input_contract                = {1, json{{"type", "object"}}};
+    data.output_contract               = {1, json{{"type", "object"}}};
+    data.orchestration_plan            = {1, json{{"entry", "main"}}};
+    data.sealed_core_definitions = {{"main", sealed_core_definition_hash(definition), definition}};
+    data.core_plan_identities    = {{"main", digest('4')}};
+    data.executable_registry_identities = registry.identities();
+    data.declared_budget_requirements   = {{"steps", 0, 10}};
+    return ProgramBundle(std::move(data));
+}
+
+AdmissionProfile profile(const RegistrySnapshot& registry) {
+    AdmissionProfileBuilder builder;
+    builder.id("persist-profile")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .mode(AdmissionMode::MultiTenant)
+        .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::CppBuilder)
+        .allow_effect_mode(EffectMode::Brokered);
+    return std::move(builder).build();
+}
+
+PolicySnapshot policy(const AdmissionProfile& profile) {
+    PolicySnapshotBuilder builder;
+    builder.id("persist-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant-persist")
+        .admission_profile(profile)
+        .budget_ceiling({1000, 100, 100, 1, 10, 100, 1, 1, 1});
+    return std::move(builder).build();
+}
+
+// A frozen contract: the store keeps contract runs of an artifact whose projection carries one.
+ContractManifest frozen_contract(const std::string& owner_scope) {
+    ContractManifestSpec spec;
+    spec.manifest_id        = "contract-demo";
+    spec.owner_scope        = owner_scope;
+    spec.scope              = "program-runtime";
+    spec.assumptions        = {"core-is-the-only-executor"};
+    spec.requirements       = {{"compile", "Compile the declared program"},
+                               {"execute", "Execute the admitted program"}};
+    spec.non_goals          = {"generic-bytecode-vm"};
+    spec.acceptance         = {{"compile-ok", "Compiler accepts the source", true, json{{"status", "ok"}}},
+                               {"execute-ok", "Independent run returns the expected value", true,
+                                json{{"value", 42}}}};
+    spec.fixed_test_vectors = {{"happy-path", json{{"input", 40}}, json{{"value", 42}}}};
+    spec.independent_oracles = {"oracle-smoke"};
+    spec.risk_register      = {{"side-effect", "Core can publish an external effect", "Use the effect outbox", true}};
+    spec.permissions        = {"program-read"};
+    spec.retry_policy       = ContractRetryPolicy{2, 100, 1000};
+    return ContractManifest::propose(std::move(spec))
+        .review(ContractReview{"reviewer", "scope and gates checked", true})
+        .freeze();
+}
+
+struct Fixture {
+    RegistrySnapshot registry_value = registry();
+    ProgramBundle    bundle_value   = bundle(registry_value);
+    AdmissionProfile profile_value  = profile(registry_value);
+    PolicySnapshot   policy_value   = policy(profile_value);
+    ProgramVersion   version_value  = ProgramVersion(
+        ProgramVersionData(bundle_value.id(),
+                           profile_value,
+                           policy_value,
+                           {},
+                           policy_value.owner_scope(),
+                           CoreMaterializationReceipt{"persist-compiler/v1",
+                                                     registry_value.fingerprint(),
+                                                     bundle_value.core_plan_identities(),
+                                                     {}}));
+    ContractManifest             contract_value = frozen_contract(policy_value.owner_scope());
+    HarnessProgramArtifactRecord artifact       = HarnessProgramArtifactRecord::create(
+        "artifact-one", policy_value.owner_scope(), bundle_value, version_value,
+        HarnessInvocationTemplate{json{{"request", "hello"}}, budget()},
+        json{{"status", "queued"},
+             {"contract_manifest", json::parse(contract_value.serialize_canonical())},
+             {"contract_manifest_hash", contract_value.content_hash()}});
+};
+
+ProgramEvent event(const Fixture&      fixture,
+                   std::string         run_id,
+                   std::uint64_t       sequence,
+                   ProgramEventKind    kind,
+                   ProgramEventPayload payload,
+                   std::int64_t        timestamp) {
+    ProgramEvent value;
+    value.sequence           = sequence;
+    value.timestamp_ms       = timestamp;
+    value.run_id             = std::move(run_id);
+    value.program_version_id = fixture.version_value.id();
+    value.bundle_id          = fixture.bundle_value.id();
+    value.operation_id       = "root";
+    value.core_generation_id = digest('5');
+    value.core_run_id        = program_root_core_thread_id(value.run_id, digest('5'));
+    value.trace_id           = "trace-one";
+    value.attempt            = 1;
+    value.kind               = kind;
+    value.payload            = std::move(payload);
+    return ProgramEvent::create(std::move(value));
+}
+
+ProgramTransitionPublication initial_publication(const Fixture& fixture, std::string run_id) {
+    const auto           granted   = budget();
+    const std::int64_t   timestamp = 10;
+    auto                 journal   = ProgramJournalRecord::create({{},
+                                                                   run_id,
+                                                                   fixture.version_value.id(),
+                                                                   fixture.bundle_value.id(),
+                                                                   1,
+                                                                   {"root", ContinuationState::Running, 1},
+                                                                   granted,
+                                                                   {},
+                                                                   std::nullopt,
+                                                                   timestamp});
+    ProgramRunRecordData data;
+    data.owner_scope         = fixture.policy_value.owner_scope();
+    data.run_id              = run_id;
+    data.program_version_id  = fixture.version_value.id();
+    data.bundle_id           = fixture.bundle_value.id();
+    data.binding_fingerprint = digest('6');
+    auto invocation          = bind_harness_invocation(fixture.artifact.invocation_template(),
+                                                       fixture.artifact.owner_scope(),
+                                                       fixture.version_value.id(), run_id, "trace-one");
+    invocation.budget        = granted;
+    data.invocation          = std::move(invocation);
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.journal_head        = journal.id;
+    data.event_sequence      = 1;
+    data.created_at_ms       = timestamp;
+    data.updated_at_ms       = timestamp;
+    return {ProgramRunRecord::create(std::move(data)),
+            journal,
+            {event(fixture, run_id, 1, ProgramEventKind::Started, ProgramStartedEvent{granted}, timestamp)},
+            {}};
+}
+
+ProgramExecutionLease execution_lease(const ProgramTransitionPublication& publication) {
+    const auto& run     = publication.run_record;
+    const auto& started = publication.events.front();
+    return ProgramExecutionLease(ProgramExecutionLeaseData{
+        run.owner_scope(), run.run_id(), run.continuation().attempt, run.program_version_id(), run.bundle_id(),
+        "main", started.core_generation_id, started.core_run_id, digest('9'), run.updated_at_ms(),
+        run.updated_at_ms() + static_cast<std::int64_t>(run.remaining_budget().wall_time_ms)});
+}
+
+RunBudget child_grant() { return {100, 10, 10, 1, 1, 1, 0, 0, 0}; }
+
+ProgramChildRecord child_record(std::string id, ProgramChildState state = ProgramChildState::Publishing) {
+    return ProgramChildRecord{
+        std::move(id), digest('7'), "link-receipt",
+        ProgramPersistedInvocation{json{{"child", true}}, child_grant(), "child-trace", kRun, 1}, state};
+}
+
+// One record store with its adapter artifact persisted, one Program run published, and the transition store bound to
+// the artifact: the objects a Harness host holds. Destroying it releases every reference to the shared
+// implementation object.
+class World {
+public:
+    explicit World(const std::string& path)
+        : store_(std::make_shared<SqliteHarnessRecordStore>(path)), publication_(initial_publication(fixture_, kRun)) {
+        HarnessBoundedProgramStore bounded(store_, fixture_.artifact.artifact_id(), owner(),
+                                           fixture_.artifact.invocation_template(),
+                                           fixture_.artifact.projection());
+        bounded.publish_admitted_sync(fixture_.bundle_value, fixture_.version_value);
+        transitions_ = std::dynamic_pointer_cast<SyncProgramTransitionStore>(
+            require_harness_program_adapter_store(store_)->bind_program_transitions(fixture_.artifact));
+        if (!transitions_) throw std::runtime_error("the bound transition store is not synchronous");
+        if (transitions_->compare_publish_sync(owner(), {}, 1, publication_) !=
+            ProgramTransitionPublishResult::Published)
+            throw std::runtime_error("the first run was not published");
+    }
+
+    SqliteHarnessRecordStore&   store() const { return *store_; }
+    SyncProgramTransitionStore& transitions() const { return *transitions_; }
+    const Fixture&              fixture() const { return fixture_; }
+    std::string                 owner() const { return fixture_.artifact.owner_scope(); }
+    const ProgramRunRecord&     run_record() const { return publication_.run_record; }
+
+private:
+    Fixture                                    fixture_;
+    std::shared_ptr<SqliteHarnessRecordStore>  store_;
+    ProgramTransitionPublication               publication_;
+    std::shared_ptr<SyncProgramTransitionStore> transitions_;
+};
+
+// The record store: its own operations and the ones that bind and resolve Program runs.
+class RecordStoreOwner {
+public:
+    static constexpr const char* kName = "HarnessRecordStore";
+    explicit RecordStoreOwner(const std::string& path) : world_(std::make_unique<World>(path)) {}
+
+    sqlite3* connection() const { return world_->store().connection_for_testing(); }
+    void     destroy() { world_.reset(); }
+
+    void write(int n) {
+        const auto id = "written-" + std::to_string(n);
+        world_->store().save_artifact(id, json{{"artifact_id", id}});
+    }
+    bool read_back(int n) const {
+        return world_->store().load_artifact("written-" + std::to_string(n)).has_value();
+    }
+
+    std::vector<Operation> operations() {
+        return {
+            {"save_artifact",
+             [this] { world_->store().save_artifact("artifact-x", json{{"artifact_id", "artifact-x"}}); }},
+            {"load_artifact", [this] { static_cast<void>(world_->store().load_artifact("artifact-x")); }},
+            {"save_run", [this] { world_->store().save_run("run-x", run_json()); }},
+            {"load_run", [this] { static_cast<void>(world_->store().load_run("run-x")); }},
+            {"append_event", [this] { world_->store().append_event(event_json()); }},
+            {"list_events", [this] { static_cast<void>(world_->store().list_events("run-x")); }},
+            {"cleanup_retained",
+             [this] { static_cast<void>(world_->store().cleanup_retained(HarnessRetentionPolicy{})); }},
+            {"bind_program_transitions",
+             [this] { static_cast<void>(world_->store().bind_program_transitions(world_->fixture().artifact)); }},
+            {"save_contract_run",
+             [this] {
+                 world_->store().save_contract_run(world_->fixture().artifact, world_->run_record(),
+                                                   ContractRun(world_->fixture().contract_value));
+             }},
+            {"load_contract_run",
+             [this] {
+                 static_cast<void>(
+                     world_->store().load_contract_run(world_->fixture().artifact, world_->run_record()));
+             }},
+            {"resolve_program_run",
+             [this] { static_cast<void>(world_->store().resolve_program_run(world_->owner(), kRun)); }},
+        };
+    }
+
+private:
+    static json run_json() {
+        return json{{"run_id", "run-x"},         {"artifact_id", "artifact-x"}, {"revision_digest", "revision"},
+                    {"protocol_version", "v1"},  {"profile", "default"},        {"status", "completed"}};
+    }
+    static json event_json() {
+        return json{{"run_id", "run-x"},         {"artifact_id", "artifact-x"}, {"revision_digest", "revision"},
+                    {"protocol_version", "v1"},  {"profile", "default"},        {"event_type", "completed"},
+                    {"payload", json{{"ok", true}}}};
+    }
+
+    std::unique_ptr<World> world_;
+};
+
+// The Program transition store the record store hands out, over the same implementation object.
+class TransitionStoreOwner {
+public:
+    static constexpr const char* kName = "HarnessProgramTransitionStore";
+    explicit TransitionStoreOwner(const std::string& path) : world_(std::make_unique<World>(path)) {}
+
+    sqlite3* connection() const { return world_->store().connection_for_testing(); }
+    void     destroy() { world_.reset(); }
+
+    void write(int n) {
+        if (world_->transitions().compare_publish_sync(world_->owner(), {}, 1, publication(n)) !=
+            ProgramTransitionPublishResult::Published)
+            throw std::runtime_error("the run was not published");
+    }
+    bool read_back(int n) const {
+        return world_->transitions().load_sync(world_->owner(), "written-" + std::to_string(n)).has_value();
+    }
+
+    std::vector<Operation> operations() {
+        return {
+            {"load_sync", [this] { static_cast<void>(transitions().load_sync(owner(), kRun)); }},
+            {"latest_sync", [this] { static_cast<void>(transitions().latest_sync(owner(), kRun)); }},
+            {"load_run_publication_head_sync",
+             [this] { static_cast<void>(transitions().load_run_publication_head_sync(owner(), kRun)); }},
+            {"load_events_sync", [this] { static_cast<void>(transitions().load_events_sync(owner(), kRun, 0)); }},
+            {"load_effects_sync",
+             [this] { static_cast<void>(transitions().load_effects_sync(owner(), kRun, 0)); }},
+            {"load_javascript_commands_sync",
+             [this] { static_cast<void>(transitions().load_javascript_commands_sync(owner(), kRun, 0)); }},
+            {"load_context_publications_sync",
+             [this] { static_cast<void>(transitions().load_context_publications_sync(owner(), kRun, 0)); }},
+            {"load_hook_outbox_entries_sync",
+             [this] { static_cast<void>(transitions().load_hook_outbox_entries_sync(owner(), kRun)); }},
+            {"verify_stored_history_sync", [this] { transitions().verify_stored_history_sync(owner(), kRun); }},
+            {"load_migration_plan_sync",
+             [this] { static_cast<void>(transitions().load_migration_plan_sync(owner(), kRun)); }},
+            {"load_lineage_sync",
+             [this] { static_cast<void>(transitions().load_lineage_sync(owner(), "lineage-one")); }},
+            {"load_run_lineage_sync",
+             [this] { static_cast<void>(transitions().load_run_lineage_sync(owner(), kRun)); }},
+            {"load_lineage_head_sync",
+             [this] { static_cast<void>(transitions().load_lineage_head_sync(owner(), "lineage-one", "head-one")); }},
+            {"load_generation_sync",
+             [this] { static_cast<void>(transitions().load_generation_sync(owner(), "lineage-one", 1)); }},
+            {"load_generation_initial_publication_sync",
+             [this] {
+                 static_cast<void>(transitions().load_generation_initial_publication_sync(owner(), "lineage-one", 1));
+             }},
+            {"load_graph_migration_capsule_sync",
+             [this] {
+                 static_cast<void>(transitions().load_graph_migration_capsule_sync(owner(), kRun, "head-one"));
+             }},
+            {"load_execution_lease_sync",
+             [this] { static_cast<void>(transitions().load_execution_lease_sync(owner(), kRun)); }},
+            {"load_child_relation_head_sync",
+             [this] { static_cast<void>(transitions().load_child_relation_head_sync(owner(), kRun)); }},
+            {"load_child_relation_sync",
+             [this] { static_cast<void>(transitions().load_child_relation_sync(owner(), kRun, "child-one")); }},
+            {"load_child_relations_sync",
+             [this] { static_cast<void>(transitions().load_child_relations_sync(owner(), kRun, false)); }},
+            {"insert_child_relation_sync",
+             [this] {
+                 static_cast<void>(transitions().insert_child_relation_sync(owner(), kRun, 1, child_record("child-one")));
+             }},
+            {"update_child_relation_sync",
+             [this] {
+                 static_cast<void>(transitions().update_child_relation_sync(
+                     owner(), kRun, 1, std::nullopt, child_record("child-one", ProgramChildState::Dispatched)));
+             }},
+            {"compare_publish_sync",
+             [this] {
+                 static_cast<void>(transitions().compare_publish_sync(owner(), {}, 1, publication_of(kRun)));
+             }},
+            {"compare_publish_execution_sync",
+             [this] {
+                 static_cast<void>(transitions().compare_publish_execution_sync(
+                     owner(), {}, 1, publication_of("run-exec"), std::nullopt, std::nullopt));
+             }},
+            {"compare_publish_takeover_sync",
+             [this] {
+                 static_cast<void>(transitions().compare_publish_takeover_sync(owner(), "absent-run", digest('1'), 1));
+             }},
+            {"compare_publish_takeover_execution_sync",
+             [this] {
+                 static_cast<void>(transitions().compare_publish_takeover_execution_sync(
+                     owner(), "absent-run", digest('1'), 1, execution_lease(publication_of(kRun))));
+             }},
+            {"load (awaitable)",
+             [this] { static_cast<void>(async::run_sync(transitions().load(owner(), kRun))); }},
+            {"compare_publish (awaitable)",
+             [this] {
+                 static_cast<void>(async::run_sync(transitions().compare_publish(owner(), {}, 1, publication_of(kRun))));
+             }},
+        };
+    }
+
+private:
+    SyncProgramTransitionStore& transitions() const { return world_->transitions(); }
+    std::string                 owner() const { return world_->owner(); }
+    ProgramTransitionPublication publication_of(std::string run) const {
+        return initial_publication(world_->fixture(), std::move(run));
+    }
+    ProgramTransitionPublication publication(int n) const { return publication_of("written-" + std::to_string(n)); }
+
+    std::unique_ptr<World> world_;
+};
+
+}  // namespace harness_world
+#endif
+
 template <class Owner>
 class StoreInForkedChild : public ::testing::Test {
 protected:
@@ -548,8 +954,103 @@ using Owners = ::testing::Types<EvidenceLedgerOwner, ContextStoreOwner, HookJour
                                 ,
                                 CoreToolGrantStoreOwner
 #endif
+#if defined(NEOGRAPH_STORE_FORK_TESTS_HAVE_HARNESS)
+                                ,
+                                harness_world::RecordStoreOwner, harness_world::TransitionStoreOwner
+#endif
                                 >;
 TYPED_TEST_SUITE(StoreInForkedChild, Owners, OwnerNames);
+
+// ---- A call under way when the child is made. The tool forks while the broker has written its marker and waits for
+// the tool: the child returns into the broker it inherited, which then reaches its release or its settle. ----
+
+// A tool that makes a child while it executes. In the child it completes, or it throws what the controller reports as
+// a call that was not started; in the parent it completes once the child has ended.
+class ForkingTool final : public Tool {
+public:
+    enum class InChild { Completes, IsRejected };
+
+    ForkingTool(test::ForkPoint& point, InChild in_child) : point_(point), in_child_(in_child) {}
+
+    ChatTool    get_definition() const override { return {"write", "", json::object()}; }
+    std::string get_name() const override { return "write"; }
+    std::string execute(const json&) override { throw std::logic_error("the broker runs this tool asynchronously"); }
+    asio::awaitable<std::string> execute_async(const json&) override {
+        ++runs;
+        if (point_.fork() && in_child_ == InChild::IsRejected)
+            throw HostAdmissionError(HostAdmissionFailure::CapacityExceeded, "the child's call is not admitted");
+        co_return "written";
+    }
+    std::atomic<int> runs{0};
+
+private:
+    test::ForkPoint& point_;
+    InChild          in_child_;
+};
+
+struct ForkedCall {
+    ForkChildEnd                       child;
+    std::optional<ToolExecutionResult> result;  // the parent's call
+    std::string                        error;   // what the parent's call threw
+    std::optional<ToolExecutionResult> replay;  // the same call again in the parent
+    int                                runs = 0;
+};
+
+// One call through a broker whose tool forks. The child ends at the first place where the call's outcome in it is
+// known: status 0 when the broker threw StoreOpenedInAnotherProcess, 1 when it returned a result, 2 when it threw
+// something else.
+ForkedCall call_with_a_fork_in_the_tool(const std::string& path, ForkingTool::InChild in_child) {
+    constexpr int kRefused = 0;
+    constexpr int kReturned = 1;
+    constexpr int kThrewOther = 2;
+
+    test::ForkPoint point;
+    ForkingTool     tool(point, in_child);
+    SQLiteToolEffectBroker broker(path, std::vector<SQLiteToolExecutableBinding>{{&tool, "write-executable:v1"}});
+    const auto controller = write_tool_controller();
+    const auto call = [&] {
+        ToolEffectIdentity identity;
+        identity.owner_scope  = "tenant";
+        identity.run_id       = "run-1";
+        identity.thread_id    = "thread";
+        identity.task_id      = "s1:act";
+        identity.operation_id = "operation";
+        identity.grant_id     = "grant";
+        identity.tool_call_id = "call-1";
+        ToolExecutionContext context;
+        context.controller = controller;
+        return async::run_sync(broker.execute(std::move(identity), tool, json::object(), std::move(context)));
+    };
+
+    ForkedCall out;
+    int        status = kThrewOther;
+    try {
+        out.result = call();
+        status     = kReturned;
+    } catch (const StoreOpenedInAnotherProcess&) {
+        status = kRefused;
+    } catch (const std::exception& error) {
+        out.error = error.what();
+    } catch (...) {
+    }
+    // The child has nothing more to do: it leaves here, before anything of the test framework runs in it.
+    if (point.in_child()) point.end_child(status);
+
+    out.child = point.child_end();
+    if (out.result) out.replay = call();
+    out.runs = tool.runs.load();
+    return out;
+}
+
+void expect_the_parents_call_completed(const ForkedCall& call) {
+    ASSERT_TRUE(call.result.has_value()) << call.error;
+    EXPECT_EQ(call.result->status, ToolTerminalStatus::Succeeded) << call.result->error;
+    EXPECT_EQ(call.result->output, "written");
+    // The parent settled its own call: a replay answers from the receipt and does not run the tool again.
+    ASSERT_TRUE(call.replay.has_value());
+    EXPECT_EQ(call.replay->status, ToolTerminalStatus::Succeeded) << call.replay->error;
+    EXPECT_EQ(call.runs, 1);
+}
 
 }  // namespace
 
@@ -647,6 +1148,22 @@ TEST(StoreOpenedInAnotherProcess, IsAConfigurationVerdict) {
     EXPECT_EQ(verdict.failure_class, graph::NodeFailureClass::ConfigError);
     EXPECT_FALSE(verdict.retryable);
     EXPECT_FALSE(verdict.routable);
+}
+
+TEST(ToolEffectBrokerInForkedChild, TheCopyThatWouldSettleTheCallIsRefused) {
+    graph::test_support::UniqueTempDir dir{"ng-fork-broker-"};
+    const auto call = call_with_a_fork_in_the_tool(dir.file("effects.sqlite"), ForkingTool::InChild::Completes);
+    EXPECT_TRUE(call.child.ok()) << call.child
+                                 << " (status 1: the child's broker settled the call; 2: it failed in another way)";
+    expect_the_parents_call_completed(call);
+}
+
+TEST(ToolEffectBrokerInForkedChild, TheCopyThatWouldReleaseTheCallIsRefused) {
+    graph::test_support::UniqueTempDir dir{"ng-fork-broker-"};
+    const auto call = call_with_a_fork_in_the_tool(dir.file("effects.sqlite"), ForkingTool::InChild::IsRejected);
+    EXPECT_TRUE(call.child.ok()) << call.child
+                                 << " (status 1: the child's broker released the call; 2: it failed in another way)";
+    expect_the_parents_call_completed(call);
 }
 
 #endif

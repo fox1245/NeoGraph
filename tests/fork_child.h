@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <ostream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -41,15 +42,11 @@ inline constexpr int kForkChildThrew = 125;
 /// The child's status when its parent had gone before the child could tie its own end to the parent's.
 inline constexpr int kForkChildOrphaned = 126;
 
-/// Makes a child by fork and runs `body` (a callable returning an exit status) in it. The child never returns into
-/// the test runner: it leaves through std::_Exit with the status `body` returns, or kForkChildThrew when `body`
-/// throws, so neither the test framework nor a static destructor runs there. `body` reports through its status and
-/// does not use the framework's assertions.
-///
-/// The parent waits for the child with no bound of its own: a child that does not end is ended together with its
-/// test by the test's TIMEOUT property (on Linux the child is killed when the thread that made it ends).
-template <class Body>
-ForkChildEnd run_in_forked_child(Body&& body) {
+namespace detail {
+
+/// Makes a child by fork. In the child (it returns 0) on Linux the child is killed when the thread that made it ends,
+/// so a test that is ended by its TIMEOUT property takes its child with it. In the parent it returns the child's id.
+inline pid_t fork_tied_to_parent() {
     const pid_t parent = ::getpid();
     const pid_t child  = ::fork();
     if (child < 0) throw std::system_error(errno, std::generic_category(), "fork");
@@ -59,13 +56,12 @@ ForkChildEnd run_in_forked_child(Body&& body) {
 #else
         static_cast<void>(parent);
 #endif
-        int status = kForkChildThrew;
-        try {
-            status = std::forward<Body>(body)();
-        } catch (...) {
-        }
-        std::_Exit(status);
     }
+    return child;
+}
+
+/// Waits for `child` with no bound of its own and says how it ended.
+inline ForkChildEnd wait_for_child(pid_t child) {
     int raw = 0;
     while (::waitpid(child, &raw, 0) < 0) {
         if (errno != EINTR) throw std::system_error(errno, std::generic_category(), "waitpid");
@@ -79,6 +75,66 @@ ForkChildEnd run_in_forked_child(Body&& body) {
     }
     return end;
 }
+
+}  // namespace detail
+
+/// Makes a child by fork and runs `body` (a callable returning an exit status) in it. The child never returns into
+/// the test runner: it leaves through std::_Exit with the status `body` returns, or kForkChildThrew when `body`
+/// throws, so neither the test framework nor a static destructor runs there. `body` reports through its status and
+/// does not use the framework's assertions.
+///
+/// The parent waits for the child with no bound of its own: a child that does not end is ended together with its
+/// test by the test's TIMEOUT property (on Linux the child is killed when the thread that made it ends).
+template <class Body>
+ForkChildEnd run_in_forked_child(Body&& body) {
+    const pid_t child = detail::fork_tied_to_parent();
+    if (child == 0) {
+        int status = kForkChildThrew;
+        try {
+            status = std::forward<Body>(body)();
+        } catch (...) {
+        }
+        std::_Exit(status);
+    }
+    return detail::wait_for_child(child);
+}
+
+/// A place in the middle of a call where a child is made, for a test of an object that a child inherits while a call
+/// of the parent is under way: the code under test (a tool that the object runs) calls fork() on the thread that runs
+/// the call, and in the child the call goes on through the object's own code. The test then ends the child with
+/// end_child() at the first place where it knows the outcome, before anything of the test framework runs there, and
+/// asks in_child() to tell the child from the parent.
+///
+/// In the parent fork() returns false only after the child has ended, so the parent goes on with the child's work
+/// finished and nothing of it waited for with a bound. A point makes one child.
+class ForkPoint {
+public:
+    /// True in the child. In the parent: false, after the child ended.
+    bool fork() {
+        if (used_) throw std::logic_error("a fork point makes one child");
+        used_ = true;
+        const pid_t child = detail::fork_tied_to_parent();
+        if (child == 0) {
+            in_child_ = true;
+            return true;
+        }
+        end_ = detail::wait_for_child(child);
+        return false;
+    }
+
+    bool in_child() const noexcept { return in_child_; }
+
+    /// How the child ended; meaningful in the parent after fork() returned.
+    const ForkChildEnd& child_end() const noexcept { return end_; }
+
+    /// Ends the child with `status`. Only the child calls it.
+    [[noreturn]] void end_child(int status) const noexcept { std::_Exit(status); }
+
+private:
+    bool         used_     = false;
+    bool         in_child_ = false;
+    ForkChildEnd end_;
+};
 
 }  // namespace neograph::test
 

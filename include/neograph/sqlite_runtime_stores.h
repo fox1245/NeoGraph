@@ -110,7 +110,10 @@ private: struct Impl; std::unique_ptr<Impl> impl_;
  *
  * A child made by fork opens a broker of its own: in the copy it inherited,
  * execute() throws StoreOpenedInAnotherProcess, and destroying the copy leaves
- * the parent's connection alone.
+ * the parent's connection alone. The same holds for a call that was under way
+ * when the child was made (a Tool that forks while the broker waits for it): the
+ * copy that the child goes on with throws the error where the call would release
+ * or settle its marker, and writes nothing.
  */
 struct SQLiteToolExecutableBinding {
     Tool* tool = nullptr;
