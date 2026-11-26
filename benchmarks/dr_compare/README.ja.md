@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=2b082a63b44c2beb85ce4d89781581abaac211bd192807db4439301f62e36f74 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=a36d8661e1426fcf2df586daac46658781336f78ad09fd8d5484137e23f8d663 -->
 # dr_compare：ディープリサーチのオーケストレーションの比較
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 ## ファイルと依存関係
 
 `dr_neograph.py`、`dr_langgraph.py`、`bench.py`、`bench_mock.py`、`mem_probe.py`、`mem_prod_stack.py`、`sweep.sh`、`_run_single.py` は、実際の呼び出し、プレーンテキストのモックのワークロード、メモリのプローブ、スイープ、単発の診断を扱います。現在のソースに合ったwheelを、[Pythonバインディングガイド](../../docs/python-binding.md)に従ってインストールしてください。`CompletionParams` や `OpenAIProvider` を持つ古いwheelは、現在のAPIではありません。ソースからビルドする場合は、Coreだけでも外部のSchemaProvider SDKが必要です。
-現在のビルドには、SDK `0.4.0`（インターフェースのリビジョンと共有世代は7、`cmake/NeoGraphSchemaProvider.cmake` が固定するSchemaProviderのコミット）に合ったwheelまたはネイティブビルドが必要です。
+現在のビルドには、SDK `0.4.7`（インターフェースのリビジョンと共有世代は7、`cmake/NeoGraphSchemaProvider.cmake` が固定するSchemaProviderのコミット）に合ったwheelまたはネイティブビルドが必要です。
 この比較用のランナーは、組み込みのDeep Researchの回復経路とは別のものです。
 
 このワークフローは、requests、LangGraph、langchain-openaiをインポートします。メモリのプローブはpsutilを使います。PostgreSQLモードでは、対応するチェックポイントのパッケージと、起動済みのデータベースも必要です。`mem_prod_stack.py` は、名前を付けたスタックごとに、Web、データベース、オブザーバビリティのパッケージを追加でインポートします。エンジンだけのRSSを測るプローブではありません。

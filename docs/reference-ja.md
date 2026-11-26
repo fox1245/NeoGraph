@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=f425df0011e14398814855beec97e3ee15698e77a86c4ce86c64285c7e2e0b61 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -33,10 +33,10 @@ CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開
 
 SDK imported target は `include/SchemaProvider` include root を提供します。公開例は recipe 専用 helper なしで `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>` を直接使います。
 
-設置 SDK package は正確に `0.4.0` で、interface revision 7 header と shared-library generation 7 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
+設置 SDK package は正確に `0.4.7` で、interface revision 7 header と shared-library generation 7 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
 
 ```cmake
-find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.7 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -390,7 +390,7 @@ Responses SSE には終了イベント `response.completed` または `response.
 
 Messages は正の output cap が必要です。mode 未指定の thinking budget は `Manual` を選び、承認 minimum 以上かつ cap 未満にします。`Adaptive`/`Disabled` は明示 budget を拒否します。Manual/adaptive はそれ以外で有効な temperature を省略し、thinking `top_p` minimum を検査しますが、モデル別 temperature 禁止は上書きしません。強制 `Any`/`Tool` は tools と disabled thinking が必要です。`Tool` は宣言済み client tool 名、他 mode は `name` を拒否、`None` は `disable_parallel_tool_use` を拒否します。Generate の thinking budget/level と `required_tool`/`generate.tool_choice` はそれぞれ排他的です。allowed-function リストは宣言済み関数を指します。sampling は family/policy の範囲内です。Generate は `top_p` 非対応、Interactions は両 sampling field 非対応です。
 
-`FamilyPolicy.temperature_forbidden_model_prefixes` はモデル全体と最後の `/` 以降を ASCII 大小文字無視で照合します。組込み Chat/Responses は `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages は `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-` です。gateway prefix のモデルでも禁止 temperature の明示指定は I/O 前に拒否します。
+モデルで `temperature` を禁止するかどうかはモデルカタログの事実です。`temperature: false` を持つカタログ項目が、大文字小文字と namespace を含めて完全一致し、その origin に限って適用されます（ファミリーポリシーのキー `temperature_forbidden_model_prefixes` と `temperature_forbidden_generations` は廃止され、空でない値はロード時に拒否されます）。組込みカタログは `https://api.openai.com` で `gpt-5`, `gpt-6`, `o1`, `o3`, `o4` を、`https://api.anthropic.com` で `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5`, `claude-fable-` を prefix として載せます。それ以外の origin や別の綴りの id ではリクエストが送られ、プロバイダーが応答します。項目が禁止する `temperature` の明示指定は、理由 `request.choice.temperature_is_prohibited_for_the_admitted` で I/O 前に拒否され、対象は受け入れたモデルと `models` の各モデルです。
 
 #### Responses provider-held continuation
 
@@ -450,7 +450,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.4.0`、interface revision 7 / shared-library generation 7、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.4.7`、interface revision 7 / shared-library generation 7、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 

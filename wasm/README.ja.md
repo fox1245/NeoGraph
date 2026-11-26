@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=c581b3c9aca1b709483022bbbf40ed7cb2e0c3070a0315ce696e0a6b54927bf5 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=8dbab3136a1296f96959c5c2b4c54a9103e574d154301a0d41eaa9e10005392e -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,7 +22,7 @@
 | ツールチェーン | Emscripten 6.0.13。CI では emsdk のリリースコミットに固定しています。 |
 | ビルドモード | シングルスレッド（WebAssembly の既定）と pthread。どちらも CI でビルドして実行します。JavaScript モジュールはシングルスレッドです。 |
 | ランタイム | CI の Node.js 22 と 24。Workers の例は `Request` を渡して Node で実行しており、workerd では実行していません。グラフ smoke は `smoke.html` と `serve_smoke.py` により Chromium でも動きます（下記）。ブラウザーでの JavaScript モジュール、Deno、WASI は未検証です。 |
-| SDK | SchemaProvider 0.4.0、インターフェースのリビジョン 7。`cmake/NeoGraphSchemaProvider.cmake` が固定するコミットを使います。libcurl もスレッドも使わずにビルドされ、SDK の JavaScript ホスト（`sp_js_host`）がモジュールの executor と `fetch` トランスポートです。 |
+| SDK | SchemaProvider 0.4.7、インターフェースのリビジョン 7。`cmake/NeoGraphSchemaProvider.cmake` が固定するコミットを使います。libcurl もスレッドも使わずにビルドされ、SDK の JavaScript ホスト（`sp_js_host`）がモジュールの executor と `fetch` トランスポートです。 |
 | コンポーネント | Core、LLM（ホストを通すモデル呼び出し）、そして Program（ホストループ上のランタイム。ストアはメモリ上にあるか、ホストが用意します）。 |
 
 ## ビルド

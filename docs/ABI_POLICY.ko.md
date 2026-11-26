@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=03f09d9ead6f5529e387139eb3c5ff330eeea4e551e13bb01c8d33e13ef9d89e -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=8ecef231202ae4181bb9f3941315bc0cbad9a3479be046eec725eb17321d4f16 -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStore는 명시적인 어댑터 마이그레이션을 위해 기존 �
 
 ## SDK와 Python 경계
 
-Core는 LLM 노드를 꺼 두더라도 외부 `SchemaProvider::runtime`이 필요합니다. 선택된 SDK 릴리스는 `0.4.0` 알파이고, 공개 SDK `main` 라인에서 `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋, 인터페이스 리비전 `7`, 공유 라이브러리 ABI 리비전 `7`이며 out-of-line capability 검사를 사용합니다. 안정적인 인터페이스라는 주장은 아닙니다. 맞는 SDK 구성 요소는 함께 설치해야 합니다. SDK의 `libsp_*.so.7` 세대는 NeoGraph의 로더 세대, Python의 `abi3` wheel 태그와 각각 별개입니다.
+Core는 LLM 노드를 꺼 두더라도 외부 `SchemaProvider::runtime`이 필요합니다. 선택된 SDK 릴리스는 `0.4.7` 알파이고, 공개 SDK `main` 라인에서 `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋, 인터페이스 리비전 `7`, 공유 라이브러리 ABI 리비전 `7`이며 out-of-line capability 검사를 사용합니다. 안정적인 인터페이스라는 주장은 아닙니다. 맞는 SDK 구성 요소는 함께 설치해야 합니다. SDK의 `libsp_*.so.7` 세대는 NeoGraph의 로더 세대, Python의 `abi3` wheel 태그와 각각 별개입니다.
 
 인터페이스 7에서는 미디어가 타입을 갖습니다. 메시지, outcome, 이벤트에서 `sp::Media`가 `sp::Image`를 대체합니다. 또한 요청 제어를 각 family 고유의 타입으로 확장하고, 채팅이 아닌 엔드포인트와 실시간 세션을 클라이언트에 추가합니다. 공개 레이아웃이 전반에 걸쳐 바뀌며, NeoGraph의 핸드셰이크는 `RequiredProvider` capability를 포함해 인터페이스 7을 요구합니다. SDK 소비자, NeoGraph, Python 확장을 함께 다시 빌드해야 하며, 이전의 헤더나 라이브러리는 인터페이스 7과 호환되지 않습니다. 블로킹 래퍼는 SDK 이벤트 루프와 콜백 워커로의 재진입을 계속 거부합니다. 네이티브 archive v3 / `spna3`는 바뀌지 않았습니다. 이식 가능한 JSON은 버전이 따로 있는 별개의 형식으로, NeoGraph는 provider 메시지, provider outcome, runtime history record를 v3로 기록합니다. v2 레코드도 계속 읽으며, 그 바이트는 그대로 유지합니다. v3 provider outcome에는 미디어 파트, 인용, 타입이 있는 도구 결과 내용, 에러 이유, 실제 응답한 모델이 추가됩니다. 정규 outcome의 usage는 금액 메타데이터가 있을 때에 한해 선택 필드 `provider_cost`를 추가합니다. 금액 메타데이터가 없던 과거 기록은 원래 바이트를 그대로 유지하며 비용을 지어내지 않습니다.
 

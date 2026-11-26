@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=03f09d9ead6f5529e387139eb3c5ff330eeea4e551e13bb01c8d33e13ef9d89e -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=8ecef231202ae4181bb9f3941315bc0cbad9a3479be046eec725eb17321d4f16 -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStoreは、アダプターへの明示的な移行のために、従�
 
 ## SDKとPythonの境界
 
-Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.4.0` alphaで、公開されているSDKの `main` ラインのうち `cmake/NeoGraphSchemaProvider.cmake` が固定するコミット、インターフェースリビジョン `7`、共有ライブラリのABIリビジョン `7` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.7` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
+Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.4.7` alphaで、公開されているSDKの `main` ラインのうち `cmake/NeoGraphSchemaProvider.cmake` が固定するコミット、インターフェースリビジョン `7`、共有ライブラリのABIリビジョン `7` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.7` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
 
 インターフェース7では、メディアが型付きになります。メッセージ、結果、イベントで、`sp::Media` が `sp::Image` に代わります。また、リクエストの制御が各familyに固有の型へ拡張され、チャット以外のエンドポイントとリアルタイムセッションがクライアントに加わりました。公開されているレイアウトは全体にわたって変わり、NeoGraphのハンドシェイクは、`RequiredProvider` のcapabilityを含めて、インターフェース7を要求します。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース7とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）は変わりません。ポータブルJSONは独立したバージョンを持つ別の形式で、NeoGraphはプロバイダーのメッセージ、プロバイダーの結果、runtime history recordをv3で書き出し、v2のレコードも引き続き読み込みます。v2のレコードのバイト列は保たれます。v3のプロバイダーの結果には、メディアパート、引用、型付きのツール結果の内容、エラーの理由、実際に応答したモデルが加わります。正規の結果の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。
 

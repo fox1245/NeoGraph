@@ -43,10 +43,10 @@ CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `
 
 The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
 
-The installed SDK package must be exactly `0.4.0`, with matching interface revision 7 headers and shared-library generation 7. A version match alone does not admit older interface/ABI binaries.
+The installed SDK package must be exactly `0.4.7`, with matching interface revision 7 headers and shared-library generation 7. A version match alone does not admit older interface/ABI binaries.
 
 ```cmake
-find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.7 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -420,7 +420,7 @@ Responses SSE requires a terminal `response.completed` or `response.incomplete` 
 
 Messages requires a positive output cap. A supplied thinking budget selects `Manual` when no mode is set; manual thinking requires at least the admitted minimum and a budget strictly below the cap. `Adaptive` and `Disabled` reject a supplied budget. Manual/adaptive thinking omits otherwise valid temperature and checks the admitted thinking `top_p` minimum; it does not override model-specific temperature prohibitions. Forced `Any`/`Tool` choice requires tools and disabled thinking; `Tool` names a declared client tool, other modes reject `name`, and `None` rejects `disable_parallel_tool_use`. Generate rejects simultaneous thinking budget/level and simultaneous `required_tool`/`generate.tool_choice`; its allowed-function list must name declared functions. Sampling remains family/policy-bounded; Generate has no `top_p`, and Interactions accepts neither sampling field.
 
-`FamilyPolicy.temperature_forbidden_model_prefixes` matches ASCII case-insensitively against the full model and the suffix after the last `/`. Built-in Chat/Responses prefixes are `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages prefixes are `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`. Explicit prohibited temperature rejects before I/O, including gateway-prefixed models.
+Whether `temperature` is prohibited for a model is a model catalogue fact: a catalogue entry with `temperature: false`, matched exactly on case and namespace and scoped to its origins (the family policy keys `temperature_forbidden_model_prefixes` and `temperature_forbidden_generations` are retired, and a non-empty one is refused at load). The embedded catalogue lists `gpt-5`, `gpt-6`, `o1`, `o3` and `o4` as prefixes at `https://api.openai.com` and `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5` and `claude-fable-` at `https://api.anthropic.com`; at any other origin, or for another spelling of the id, the request is sent and the provider answers. An explicit `temperature` that the entry prohibits is rejected before I/O with the reason `request.choice.temperature_is_prohibited_for_the_admitted`, for the admitted model and for each model of `models`.
 
 #### Responses provider-held continuation
 
@@ -480,7 +480,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.4.0`, interface revision 7 / shared-library generation 7, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.4.7`, interface revision 7 / shared-library generation 7, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
 
 Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
 

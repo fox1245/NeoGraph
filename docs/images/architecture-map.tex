@@ -142,7 +142,7 @@
 % source: src/llm/schema_provider.cpp; src/llm/agent.cpp
 \node[master] (i_llm) at (10.6,15.4) {\textbf{neograph::llm}\\\cn{SchemaProvider} adapter, \cn{Agent} loop};
 % source: cmake/NeoGraphSchemaProvider.cmake
-\node[ext] (i_sp) at (14.899999999999999,15.4) {\textbf{SchemaProvider SDK}\\typed provider calls (pinned, 0.4.0)};
+\node[ext] (i_sp) at (14.899999999999999,15.4) {\textbf{SchemaProvider SDK}\\typed provider calls (pinned, 0.4.7)};
 % source: src/async/http_client.cpp; src/async/ws_client.cpp; src/async/sse_parser.cpp
 \node[master] (i_async) at (2.0,15.4) {\textbf{neograph::async}\\HTTP/2 pool, SSE, WebSocket, \cn{HostLoop}};
 % source: src/observability/openinference.cpp
@@ -177,13 +177,13 @@
 \draw[fl] (h_a2a.south) -- (h_a2a |- pframe.north);
 % rel: h_harn drives ProgramRuntime
 \draw[fl] (h_harn.south) -- (h_harn |- pframe.north);
-\draw[fl] (p_src.east) -- (p_cmp.west) node[el,above,pos=0.5] {source};
-\draw[fl] (p_cmp.east) -- (p_cat.west) node[el,above,pos=0.5] {bundle};
+\draw[fl] (p_src.east) -- (p_cmp.west) node[el,above=2pt,pos=0.5] {source};
+\draw[fl] (p_cmp.east) -- (p_cat.west) node[el,above=2pt,pos=0.5] {bundle};
 \draw[fl] (p_pol.south) -- (p_cat.north) node[el,right,pos=0.5] {admit against};
-\draw[fl] (p_cat.east) -- (p_ps.west) node[el,above,pos=0.5] {keeps};
+\draw[fl] (p_cat.east) -- (p_ps.west) node[el,above=2pt,pos=0.5] {keeps};
 \draw[fl] (p_rt.north) -- (p_cat.south) node[el,right,pos=0.5] {resolve version};
-\draw[fl] (p_att.east) -- (p_cmd.west) node[el,above,pos=0.5] {journals};
-\draw[fl] (p_att.west) -- (engframe.east |- p_att.west) node[el,above,pos=0.5] {callCore};
+\draw[fl] (p_att.east) -- (p_cmd.west) node[el,above=2pt,pos=0.5] {journals};
+\draw[fl] (p_att.west) -- (engframe.east |- p_att.west) node[el,above=2pt,pos=0.5] {callCore};
 \draw[fl] (rtframe.south) -- (t_if.north |- rtframe.south) -- (t_if.north) node[el,right,pos=0.5] {compare\_publish (CAS)};
 \draw[fl] (t_if.south -| t_mem.north) -- (t_mem.north);
 \draw[fl] (t_if.south -| t_sq.north) -- (t_sq.north);
@@ -192,8 +192,8 @@
 \draw[fl] (t_if.south -| t_js.north) -- (t_js.north);
 \draw[fl] (c_coord.south) -- (c_cp.north) node[el,right,pos=0.5] {saves to};
 \draw[fl] (c_prov.south) -- (i_llm.north) node[el,right,pos=0.5] {implemented by};
-\draw[fl] (i_llm.east) -- (i_sp.west) node[el,above,pos=0.5] {calls};
-\draw[fl] (c_cp.east) -- (c_cpi.west) node[el,above,pos=0.5] {impl.};
+\draw[fl] (i_llm.east) -- (i_sp.west) node[el,above=2pt,pos=0.5] {calls};
+\draw[fl] (c_cp.east) -- (c_cpi.west) node[el,above=2pt,pos=0.5] {impl.};
 \node[lab,anchor=north west] at (0.2,11.6) {\textbf{Legend}};
 \node[master,text width=1.0cm,minimum height=0.45cm,anchor=north west,inner sep=1pt] (lgmaster) at (0.2,11.05) {};
 \node[lab,anchor=west] at (1.35,10.83) {NeoGraph};
@@ -227,8 +227,8 @@
 \draw[fl] (s6.south) -- (s7.north);
 % source: src/program/store.cpp; src/program/sqlite_store.cpp; src/program/postgres_store.cpp
 \node[master,text width=5.4cm] (ps) at (14.0,25.25) {\textbf{ProgramStore}\\versions and the activation pointer (memory, SQLite, PostgreSQL)};
-\draw[fl] (s3.east) -| (ps.north) node[el,above,pos=0.25] {stores version};
-\draw[fl] (s4.east) -| (ps.south) node[el,above,pos=0.25] {CAS activation};
+\draw[fl] (s3.east) -| (ps.north) node[el,above=2pt,pos=0.25] {stores version};
+\draw[fl] (s4.east) -| (ps.south) node[el,above=2pt,pos=0.25] {CAS activation};
 % source: include/neograph/program/transition_store.h; src/program/transition_store.cpp
 \node[master,text width=4.9cm,minimum height=22.5cm] (bar) at (40.0,22.0) {\textbf{ProgramTransitionStore}\\[3pt]\cn{compare_publish(owner, expected_journal_head, publication)}\\[3pt]Published\\AlreadyPresent (exact retry)\\Conflict (head moved)\\[4pt]one atomic unit: run record, journal record, events, effect outbox, command entries, lineage + generation, context + hook outbox, child synthesis records\\[4pt]reads: \cn{load}, \cn{latest}, \cn{load_events}, \cn{load_javascript_commands}\\[4pt]memory, SQLite, PostgreSQL, Harness SQLite, JS host};
 % source: src/program/command.cpp
@@ -239,15 +239,15 @@
 \node[master,text width=5.0cm,minimum height=2.1cm] (k3) at (26.2,17.5) {\textbf{execute}\\callCore $\to$ \cn{GraphEngine} (with grants, budget, provider broker); spawn / await / join $\to$ children};
 % source: src/program/command_journal.cpp
 \node[master,text width=4.2cm,minimum height=2.1cm] (k4) at (32.8,17.5) {\textbf{completion}\\result journaled in the next publication; the command is complete};
-\draw[fl] (s6.east) -- (k1.west) node[el,above,pos=0.5] {commands};
+\draw[fl] (s6.east) -- (k1.west) node[el,above=2pt,pos=0.5] {commands};
 \draw[fl] (k1.east) -- (k2.west);
-\draw[fl] (k2.east) -- (k3.west) node[el,above,pos=0.5] {run};
-\draw[fl] (k3.east) -- (k4.west) node[el,above,pos=0.5] {result};
-\draw[fl] (k4.south west) -- ++(0,-0.9) -| (k1.south) node[el,above,pos=0.25] {main() resumes with the result};
-\draw[fl] (k2.north) -- (k2.north |- 0,19.9) -- (bar.west |- 0,19.9) node[el,above,pos=0.85] {publishes};
+\draw[fl] (k2.east) -- (k3.west) node[el,above=2pt,pos=0.5] {run};
+\draw[fl] (k3.east) -- (k4.west) node[el,above=2pt,pos=0.5] {result};
+\draw[fl] ([xshift=6pt]k4.south west) -- ++(0,-0.9) -| (k1.south) node[el,above=2pt,pos=0.25] {main() resumes with the result};
+\draw[fl] (k2.north) -- (k2.north |- 0,19.9) -- (bar.west |- 0,19.9) node[el,above=2pt,pos=0.85] {publishes};
 \draw[fl] (k4.north) -- (k4.north |- 0,19.9);
-\draw[fl] (s5.east) -- (bar.west |- s5.east) node[el,above,pos=0.2] {first publication (compare\_publish)};
-\draw[fl] (s7.east) -- (bar.west |- s7.east) node[el,above,pos=0.2] {terminal publication};
+\draw[fl] (s5.east) -- (bar.west |- s5.east) node[el,above=2pt,pos=0.2] {first publication (compare\_publish)};
+\draw[fl] (s7.east) -- (bar.west |- s7.east) node[el,above=2pt,pos=0.11] {terminal publication};
 % source: src/program/runtime.cpp; include/neograph/program/run_record.h
 \node[master,text width=5.0cm,minimum height=2.3cm] (c1) at (13.0,11.0) {\textbf{spawn}\\\cn{start_child_core}: publishes the parent--child attachment and reserves the child's budget before dispatch};
 % source: src/program/runtime.cpp
@@ -256,11 +256,11 @@
 \node[master,text width=5.0cm,minimum height=2.3cm] (c3) at (26.2,11.0) {\textbf{child terminal}\\child publishes its end; \cn{wake_paused_parent} resumes an awaiting parent};
 % source: src/program/run_attempt.cpp
 \node[master,text width=4.2cm,minimum height=2.3cm] (c4) at (32.8,11.0) {\textbf{join}\\all / race / quorum modes; the parent continues the command};
-\draw[fl] (k3.south) -- ++(0,-1.6) -| (c1.north) node[el,above,pos=0.3] {spawn};
-\draw[fl] (c1.east) -- (c2.west) node[el,above,pos=0.5] {starts};
-\draw[fl] (c2.east) -- (c3.west) node[el,above,pos=0.5] {ends};
-\draw[fl] (c3.east) -- (c4.west) node[el,above,pos=0.5] {wakes};
-\draw[fl] (c4.north east) -- (k4.south east) node[el,left,pos=0.3] {completes};
+\draw[fl] (k3.south) -- ++(0,-1.6) -| (c1.north) node[el,above=2pt,pos=0.3] {spawn};
+\draw[fl] (c1.east) -- (c2.west) node[el,above=2pt,pos=0.5] {starts};
+\draw[fl] (c2.east) -- (c3.west) node[el,above=2pt,pos=0.5] {ends};
+\draw[fl] (c3.east) -- (c4.west) node[el,above=2pt,pos=0.5] {wakes};
+\draw[fl] ([xshift=-6pt]c4.north east) -- ([xshift=-6pt]k4.south east) node[el,left,pos=0.3] {completes};
 % source: include/neograph/program/runtime.h
 \node[master,text width=5.4cm,minimum height=2.4cm] (r1) at (6.8,5.4) {\textbf{after a crash}\\\cn{reconnect(owner, run_id)} rebuilds a handle from the stored head; \cn{recover_children}, \cn{resume}, \cn{reconcile}};
 % source: include/neograph/program/transition_store.h

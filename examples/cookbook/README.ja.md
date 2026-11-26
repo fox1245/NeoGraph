@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=2b1edd2874749ce5d0bc9d01ffd13e06e8bb22a499b2572cca9079e67bbc2272 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=9f85a424126616eb494463ab8a3b2dfccc006e2530d08afa3e9a98fdb3ebfdf1 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ Core-only を含むすべての native ビルドには `SchemaProvider::runtime`
 または immutable public SDK archive fallback を使います。offline のインストール済み/source SDK では
 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` で fetching を止めます。
 インストール include root は `include/SchemaProvider` です。interface/capability 検査を行い、
-SDK `0.4.0` alpha の interface revision/shared ABI は7です。
+SDK `0.4.7` alpha の interface revision/shared ABI は7です。
 
 保存済み interface-3 model-free 実行では Assembly の実際のローカル A2A member サーバー四つと C++ speaker、
 JARVIS CLI synthetic turn とメモリ永続化、Beast strict Core コンパイル・進化・チェックポイント rollback、

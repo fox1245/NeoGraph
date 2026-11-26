@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=bbfba1a87c6a9a4f4f7c7a732df64ce07c6ddacc41c9b8ac7024042f05a40fba -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=7baa0a88f85dc4aecc70bf7d10bc3e0b888bfcd0c6f1378ac8b562768665e5ce -->
 # NeoGraphとPythonのグラフ／パイプラインフレームワークの比較 — エンジンのオーバーヘッドベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@ Pythonのオーケストレーションフレームワーク 5 つについて�
 CPU、カーネル、パッケージのバージョン、ロードアベレージ、スクリプトの sha256）が含まれます。表が記録と食い違うとテストが失敗します。
 別々のセッションでバージョンを混ぜて測定した以前の表は、現在では無効と分かっている項目の注記とともに
 [2026-04 の履歴](history/engine-overhead-2026-04.md)に残してあり、このページの表とは比較できません。
-現在のNeoGraph `0.16.0` のレシピには、alpha SDK `0.4.0`（インターフェースのリビジョンと共有世代は7）と、それに合ったヘッダーおよびライブラリーが必要です。
+現在のNeoGraph `0.16.0` のレシピには、alpha SDK `0.4.7`（インターフェースのリビジョンと共有世代は7）と、それに合ったヘッダーおよびライブラリーが必要です。
 
 Programのadmission、JavaScriptによる制御、SQLite／PostgreSQLのランタイムのコストについては、[Programのコストの測定](../docs/PROGRAM_COST_MEASUREMENT.md)を参照してください。
 そちらのマトリクスにはジャーナルとチェックポイントの処理が含まれているので、下のチェックポイントなしのCoreの比較と並べて示してはいけません。

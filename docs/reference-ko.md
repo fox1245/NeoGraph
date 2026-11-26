@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=f425df0011e14398814855beec97e3ee15698e77a86c4ce86c64285c7e2e0b61 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -42,10 +42,10 @@ CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공�
 
 SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
 
-설치 SDK package는 정확히 `0.4.0`이어야 하며 interface revision 7 header와 shared-library generation 7이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
+설치 SDK package는 정확히 `0.4.7`이어야 하며 interface revision 7 header와 shared-library generation 7이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
 
 ```cmake
-find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.7 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -419,7 +419,7 @@ Responses SSE는 종료 이벤트 `response.completed` 또는 `response.incomple
 
 Messages는 양수 output cap이 필요하다. mode 없이 thinking budget을 주면 `Manual`이며 승인 minimum 이상, cap 미만이어야 한다. `Adaptive`/`Disabled`는 명시적 budget을 거부한다. Manual/adaptive는 그 외 유효한 temperature를 생략하고 thinking `top_p` minimum을 검사하지만 모델별 temperature 금지는 무시하지 않는다. 강제 `Any`/`Tool`은 도구와 disabled thinking이 필요하다. `Tool` 이름은 선언된 client tool이어야 하고 다른 mode는 `name`을 거부하며 `None`은 `disable_parallel_tool_use`를 거부한다. Generate의 thinking budget/level과 `required_tool`/`generate.tool_choice`는 각각 동시 사용 불가다. allowed-function 목록은 선언된 함수를 가리킨다. sampling은 family/policy 범위를 따른다. Generate에는 `top_p`가 없고 Interactions에는 두 sampling 필드 모두 없다.
 
-`FamilyPolicy.temperature_forbidden_model_prefixes`는 전체 모델과 마지막 `/` 뒤 suffix를 ASCII 대소문자 무시로 비교한다. 내장 Chat/Responses prefix는 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages는 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`다. 명시적 금지 temperature는 gateway prefix 모델에서도 I/O 전에 거부한다.
+모델에 `temperature`가 금지되는지는 모델 카탈로그의 사실이다. `temperature: false`를 가진 카탈로그 항목이 대소문자와 namespace까지 정확히 일치하고 그 origin에서만 적용된다(패밀리 정책의 키 `temperature_forbidden_model_prefixes`와 `temperature_forbidden_generations`는 폐지되었고, 비어 있지 않으면 로드 때 거부된다). 내장 카탈로그는 `https://api.openai.com`에서 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`를, `https://api.anthropic.com`에서 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5`, `claude-fable-`를 prefix로 싣는다. 다른 origin이나 다른 표기의 id는 요청이 전송되고 provider가 답한다. 항목이 금지한 `temperature`의 명시 지정은 이유 `request.choice.temperature_is_prohibited_for_the_admitted`로 I/O 전에 거부되며, 허용된 모델과 `models`의 각 모델에 적용된다.
 
 #### Responses provider-held continuation
 
@@ -479,7 +479,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.4.0`, interface revision 7 / shared-library generation 7이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.4.7`, interface revision 7 / shared-library generation 7이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 

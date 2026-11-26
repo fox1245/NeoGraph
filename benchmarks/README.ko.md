@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=bbfba1a87c6a9a4f4f7c7a732df64ce07c6ddacc41c9b8ac7024042f05a40fba -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=7baa0a88f85dc4aecc70bf7d10bc3e0b888bfcd0c6f1378ac8b562768665e5ce -->
 # NeoGraph와 Python 그래프/파이프라인 프레임워크 비교 — 엔진 오버헤드 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@ I/O, sleep, 모델 호출, 내구성 체크포인트가 없는 두 개의 소규
 플래그, CPU, 커널, 패키지 버전, 부하 평균, 스크립트의 sha256)가 들어 있습니다. 표가 기록과 다르면 테스트가 실패합니다.
 서로 다른 세션에서 버전을 섞어 측정한 이전 표는 현재 무효로 알려진 항목에 대한 설명과 함께
 [2026-04 이력](history/engine-overhead-2026-04.md)에 보존되어 있으며, 이 페이지의 표와 비교할 수 없습니다.
-현재 NeoGraph `0.16.0` 레시피는 alpha SDK `0.4.0`과, 인터페이스 리비전·공유 세대(generation) 7에 맞는
+현재 NeoGraph `0.16.0` 레시피는 alpha SDK `0.4.7`과, 인터페이스 리비전·공유 세대(generation) 7에 맞는
 헤더와 라이브러리를 요구합니다.
 
 Program 승인(admission), JavaScript 제어, SQLite/PostgreSQL 런타임 비용은
