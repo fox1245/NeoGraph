@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=c581b3c9aca1b709483022bbbf40ed7cb2e0c3070a0315ce696e0a6b54927bf5 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=8dbab3136a1296f96959c5c2b4c54a9103e574d154301a0d41eaa9e10005392e -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,7 +22,7 @@
 | 툴체인 | Emscripten 6.0.13. CI에서 emsdk 릴리스 커밋으로 고정합니다. |
 | 빌드 모드 | 싱글 스레드(WebAssembly의 기본값)와 pthread. 둘 다 CI에서 빌드하고 실행합니다. JavaScript 모듈은 싱글 스레드입니다. |
 | 런타임 | CI의 Node.js 22와 24. Workers 예제는 `Request`를 넘겨 Node에서 실행하며, workerd에서는 실행하지 않았습니다. 그래프 smoke는 `smoke.html`과 `serve_smoke.py`를 통해 Chromium에서도 실행됩니다(아래). 브라우저에서의 JavaScript 모듈, Deno, WASI는 검증하지 않았습니다. |
-| SDK | SchemaProvider 0.4.0, 인터페이스 리비전 7. `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋을 씁니다. libcurl 없이, 스레드 없이 빌드되며, SDK의 JavaScript 호스트(`sp_js_host`)가 모듈의 executor와 `fetch` 트랜스포트입니다. |
+| SDK | SchemaProvider 0.4.7, 인터페이스 리비전 7. `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋을 씁니다. libcurl 없이, 스레드 없이 빌드되며, SDK의 JavaScript 호스트(`sp_js_host`)가 모듈의 executor와 `fetch` 트랜스포트입니다. |
 | 구성 요소 | Core, LLM(호스트를 통한 모델 호출), 그리고 Program(호스트 루프 위의 런타임. 저장소는 메모리에 있거나 호스트가 제공합니다). |
 
 ## 빌드

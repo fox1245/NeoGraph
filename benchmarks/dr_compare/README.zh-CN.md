@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=2b082a63b44c2beb85ce4d89781581abaac211bd192807db4439301f62e36f74 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=a36d8661e1426fcf2df586daac46658781336f78ad09fd8d5484137e23f8d663 -->
 # dr_compare：深度研究编排对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 ## 文件与依赖
 
 `dr_neograph.py`、`dr_langgraph.py`、`bench.py`、`bench_mock.py`、`mem_probe.py`、`mem_prod_stack.py`、`sweep.sh`、`_run_single.py` 覆盖了真实调用、纯文本的 mock 工作负载、内存探测、参数扫描和一次性的问题诊断。请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel；带有 `CompletionParams`/`OpenAIProvider` 的旧 wheel，不是当前的 API。从源码构建时，即使只用 Core，也需要外部的 SchemaProvider SDK。
-当前的构建需要与 SDK `0.4.0`、接口修订版/共享库代数 7 相匹配的 wheel 或原生构建，
+当前的构建需要与 SDK `0.4.7`、接口修订版/共享库代数 7 相匹配的 wheel 或原生构建，
 对应 `cmake/NeoGraphSchemaProvider.cmake` 所固定的 SchemaProvider 提交。
 这个对比用的 runner，与内置的 Deep Research 恢复路径是分开的。
 

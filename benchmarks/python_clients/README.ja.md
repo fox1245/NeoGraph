@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=9eb323da15539ee4bca6ce0c716a1012e6f981bec388df65b8b346e3014d145f -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=5b109feb1e5628578c7a0b99b742cdfc848a0b38940ccdf0712ffd33c98ed1ec -->
 # Pythonクライアントのオーバーヘッド：現在のランナーと過去の結果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -47,7 +47,7 @@ K=16と64でスループットが落ちたのは、`ThreadingHTTPServer` とク�
 どちらのクライアントも、同じプライベートなHTTPのループバックのpeerと、同じChatのルートを使います。レスポンスは、テキストが `ok` の定型のものです。peerは、ルート、モデル、プロンプトを検証します。ホスト型の認証情報も、カスタムCAも、有料の呼び出しも不要です。これはHTTP/1.0のローカルなプロトコルのワークロードです。TLSやHTTP/2のトランスポートの適格性確認でも、ネイティブのリプレイのベンチマークでもありません。定型のトークン使用量は、プロバイダーが報告した値として用意したフィクスチャのデータです。測定したトークン数でも、予算の課金でもありません。
 
 現在のソースに合ったwheelを、[Pythonバインディングガイド](../../docs/python-binding.md)に従ってインストールし、そのあと、下の比較用のSDKをインストールします。ソースからビルドする場合は、Coreだけでも外部の `SchemaProvider::runtime` が必要です。[ビルドガイド](../../README.md)に従ってください。Pythonのラッパーだけでは、古いwheelに型付きのネイティブAPIを追加することはできません。
-NeoGraph `0.16.0` では、wheelとネイティブのコンシューマーを、alpha SDK `0.4.0`（インターフェースのリビジョンと共有世代は7）に合わせる必要があります。
+NeoGraph `0.16.0` では、wheelとネイティブのコンシューマーを、alpha SDK `0.4.7`（インターフェースのリビジョンと共有世代は7）に合わせる必要があります。
 
 ## 新しいコホートの実行
 

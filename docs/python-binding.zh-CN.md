@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=c17006125ce81341cb1bacb505dfdc48044313727625d4128d295f28f29fd310 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=bc7e9ed71e37e6aa38bcdc083065913c96e3e21e074d962953909e5e1d7e4b0c -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine` 是同一套 C++ 运行时的 pybind11 接口。wheel 启用了 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；从源码构建时，可选组件只有编译进去的才会暴露。
 
-本指南要求使用针对 SchemaProvider SDK `0.4.0`、接口修订版 `7` 和共享库 ABI 修订版 `7` 构建的 wheel，并且要连同其捆绑的组件一起安装。仍然暴露 `complete` 的旧版 wheel 使用的是另一套 provider 接口，无法运行下面带类型的示例。
+本指南要求使用针对 SchemaProvider SDK `0.4.7`、接口修订版 `7` 和共享库 ABI 修订版 `7` 构建的 wheel，并且要连同其捆绑的组件一起安装。仍然暴露 `complete` 的旧版 wheel 使用的是另一套 provider 接口，无法运行下面带类型的示例。
 
 ```bash
 pip install neograph-engine

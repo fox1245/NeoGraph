@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=03f09d9ead6f5529e387139eb3c5ff330eeea4e551e13bb01c8d33e13ef9d89e -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=8ecef231202ae4181bb9f3941315bc0cbad9a3479be046eec725eb17321d4f16 -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStore 为了显式的适配器迁移而保留旧的布局。同步的�
 
 ## SDK 与 Python 的边界
 
-即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.4.0` alpha，公开的 SDK `main` 分支上由 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交，接口修订版 `7`，共享库 ABI 修订版 `7`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.7` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
+即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.4.7` alpha，公开的 SDK `main` 分支上由 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交，接口修订版 `7`，共享库 ABI 修订版 `7`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.7` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
 
 接口 7 让媒体带上类型：在消息、outcome 和事件中，`sp::Media` 取代了 `sp::Image`。它还把请求控制扩展为各 family 自己的类型，并给客户端增加了非聊天端点和实时会话。公共布局全面改变，NeoGraph 的握手要求接口 7 及其 `RequiredProvider` 的 capability。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 7 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 保持不变。可移植 JSON 是版本独立的另一种格式：NeoGraph 以 v3 写出 provider 消息、provider outcome 和 runtime history record，并仍可读取它们的 v2 记录，且保留其字节。v3 的 provider outcome 增加了媒体部件、引用、带类型的工具结果内容、错误原因和实际响应的模型。规范的 outcome usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
 

@@ -21,7 +21,7 @@ The plan is in [#535](https://github.com/fox1245/NeoGraph/issues/535), and this 
 | Toolchain | Emscripten 6.0.13, pinned in CI to the emsdk release commit. |
 | Build modes | Single-thread (the default on WebAssembly) and pthread, both built and run in CI. The JavaScript module is single-thread. |
 | Runtime | Node.js 22 and 24, in CI. The Workers example runs in Node, called with a `Request`; it has not run on workerd. The graph smoke also runs in Chromium through `smoke.html` and `serve_smoke.py` (below); the JavaScript module in a browser, Deno and WASI are not verified. |
-| SDK | SchemaProvider 0.4.0, interface revision 7, at the commit that `cmake/NeoGraphSchemaProvider.cmake` pins. It builds without libcurl and without threads, and its JavaScript host (`sp_js_host`) is the executor and the `fetch` transport of the module. |
+| SDK | SchemaProvider 0.4.7, interface revision 7, at the commit that `cmake/NeoGraphSchemaProvider.cmake` pins. It builds without libcurl and without threads, and its JavaScript host (`sp_js_host`) is the executor and the `fetch` transport of the module. |
 | Components | Core, LLM (model calls through the host), and Program (the runtime on the host's loop; the stores are in memory or the host's own). |
 
 ## Build

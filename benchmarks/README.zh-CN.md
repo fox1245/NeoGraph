@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=bbfba1a87c6a9a4f4f7c7a732df64ce07c6ddacc41c9b8ac7024042f05a40fba -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=7baa0a88f85dc4aecc70bf7d10bc3e0b888bfcd0c6f1378ac8b562768665e5ce -->
 # NeoGraph 与 Python 图/流水线框架对比：引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -10,7 +10,7 @@
 记录包含每个单元的原始样本和会话的来源信息：提交、编译器与标志、CPU、内核、软件包版本、平均负载以及脚本的 sha256。
 表格与记录不一致时，测试会失败。此前在不同会话中、混用版本测得的表格，连同对现已确认无效之处的说明，保留在
 [2026-04 历史记录](history/engine-overhead-2026-04.md)中，不能与本页的表格相比较。
-当前 NeoGraph `0.16.0` 的构建方案需要 alpha SDK `0.4.0`、接口修订/共享代数 7，以及与之匹配的头文件和库。
+当前 NeoGraph `0.16.0` 的构建方案需要 alpha SDK `0.4.7`、接口修订/共享代数 7，以及与之匹配的头文件和库。
 
 关于 Program 准入、JavaScript 控制以及 SQLite/PostgreSQL 运行时开销，请参阅[Program 成本测量](../docs/PROGRAM_COST_MEASUREMENT.md)。
 那个独立的测量矩阵包含日志/检查点工作，不能当作下面不含检查点的 Core 对比来呈现。

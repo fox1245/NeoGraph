@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=c581b3c9aca1b709483022bbbf40ed7cb2e0c3070a0315ce696e0a6b54927bf5 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=8dbab3136a1296f96959c5c2b4c54a9103e574d154301a0d41eaa9e10005392e -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,7 +21,7 @@
 | 工具链 | Emscripten 6.0.13。CI 中固定到 emsdk 的发布提交。 |
 | 构建模式 | 单线程（WebAssembly 上的默认值）和 pthread，二者都在 CI 中构建并运行。JavaScript 模块是单线程的。 |
 | 运行时 | CI 中的 Node.js 22 和 24。Workers 示例在 Node 中以 `Request` 调用来运行，尚未在 workerd 上运行。图 smoke 也通过 `smoke.html` 和 `serve_smoke.py` 在 Chromium 中运行（见下文）；浏览器中的 JavaScript 模块、Deno 和 WASI 尚未验证。 |
-| SDK | SchemaProvider 0.4.0，接口修订版 7，使用 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交。可在没有 libcurl、没有线程的情况下构建，其 JavaScript 宿主（`sp_js_host`）就是模块的 executor 和 `fetch` 传输层。 |
+| SDK | SchemaProvider 0.4.7，接口修订版 7，使用 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交。可在没有 libcurl、没有线程的情况下构建，其 JavaScript 宿主（`sp_js_host`）就是模块的 executor 和 `fetch` 传输层。 |
 | 组件 | Core、LLM（通过宿主的模型调用），以及 Program（宿主循环上的运行时；存储在内存中，或由宿主提供）。 |
 
 ## 构建

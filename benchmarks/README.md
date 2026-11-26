@@ -12,7 +12,7 @@ provenance of the session: commits, compiler and flags, CPU, kernel, package ver
 the scripts. A test fails when a table differs from its record. The earlier tables, measured in separate sessions
 with mixed versions, are kept with a note on what is known to be invalid in
 [the 2026-04 history](history/engine-overhead-2026-04.md); they are not comparable with the tables here.
-Current NeoGraph `0.16.0` recipes require alpha SDK `0.4.0`, interface revision/shared
+Current NeoGraph `0.16.0` recipes require alpha SDK `0.4.7`, interface revision/shared
 generation 7, with matching headers and libraries.
 
 For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,

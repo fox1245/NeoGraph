@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=f425df0011e14398814855beec97e3ee15698e77a86c4ce86c64285c7e2e0b61 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -40,10 +40,10 @@
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
-已安装 SDK package 须恰为 `0.4.0`，并匹配 interface revision 7 header 和 shared-library generation 7。版本匹配本身不批准旧 interface/ABI binary。
+已安装 SDK package 须恰为 `0.4.7`，并匹配 interface revision 7 header 和 shared-library generation 7。版本匹配本身不批准旧 interface/ABI binary。
 
 ```cmake
-find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.7 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -420,7 +420,7 @@ Responses SSE 要求终止事件 `response.completed` 或 `response.incomplete`�
 
 Messages 要求正 output cap。无 mode 的 thinking budget 选择 `Manual`，须达到获准 minimum 且严格小于 cap。`Adaptive`/`Disabled` 拒绝显式 budget。Manual/adaptive 省略其他方面有效的 temperature 并检查 thinking `top_p` minimum，但不覆盖模型 temperature 禁令。强制 `Any`/`Tool` 要求 tools 和 disabled thinking；`Tool` 指定已声明 client tool，其他 mode 拒绝 `name`，`None` 拒绝 `disable_parallel_tool_use`。Generate 的 thinking budget/level 与 `required_tool`/`generate.tool_choice` 分别互斥；allowed-function 列表须引用已声明函数。sampling 遵守 family/policy 范围。Generate 没有 `top_p`，Interactions 不接受两个 sampling 字段。
 
-`FamilyPolicy.temperature_forbidden_model_prefixes` 按 ASCII 大小写不敏感方式匹配完整模型名及最后 `/` 后的 suffix。内置 Chat/Responses 前缀为 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`；Messages 为 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`。显式禁用 temperature 在 I/O 前拒绝，包括 gateway 前缀模型。
+某个模型是否禁用 `temperature` 是模型目录的事实：带有 `temperature: false` 的目录条目，按大小写和 namespace 精确匹配，且只在其 origin 上生效（家族策略的键 `temperature_forbidden_model_prefixes` 和 `temperature_forbidden_generations` 已废弃，非空值在加载时被拒绝）。内置目录在 `https://api.openai.com` 以前缀列出 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`，在 `https://api.anthropic.com` 以前缀列出 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5`, `claude-fable-`；在其他 origin 或 id 拼写不同时，请求会发出，由提供方应答。条目禁用的 `temperature` 被显式指定时，在 I/O 前以原因 `request.choice.temperature_is_prohibited_for_the_admitted` 拒绝，适用于被接纳的模型和 `models` 中的每个模型。
 
 #### Responses provider-held continuation
 
@@ -480,7 +480,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.4.0`、interface revision 7 / shared-library generation 7，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.4.7`、interface revision 7 / shared-library generation 7，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 
