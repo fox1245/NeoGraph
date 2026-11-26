@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d276ab30960726450ab11521160f2937a7dcd2a9a239abbc444910c581779882 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2494,7 +2494,7 @@ public:
   - 呼び出しが報告したトークン使用量は、実行の使用量に加算されます。使用量を報告しない呼び出し（moderation、ダウンロード）は何も加算しないため、実行のほかの呼び出しの合計を消しません。
   - 呼び出しはチャット呼び出しと同じ経路をたどります（`make_endpoint_request`）。実行の provider 呼び出し broker がこれらをジャーナルに記録してリプレイし、Program ではホストが `add_core_endpoint_node` でノードを登録します。
   - model token 予算または managed budget lease は、エンドポイント呼び出しに出力の上限がないため、送信する前にその呼び出しを拒否します。
-  - 価格付きの Program バインディングは、エンドポイント呼び出しを provider の model catalogue に対する SDK の準備済み呼び出しの上限（`sp::runtime::endpoint_worst_case_cost`）で hold し、provider が報告したコストで、なければ結果に対する SDK の見積もり（`sp::runtime::endpoint_estimate`）で精算します。SDK が上限なしとする理由ごとに、送信する前にその `P_MONEY_*` コードで呼び出しを拒否します。レコードの `pricing.endpoint` はエンドポイント、operation、上限の line を示します。ポリシーが provider は請求しないとする operation の呼び出し（poll、download、ファイル呼び出し、moderation）には価格を付けません。OpenRouter では embeddings 呼び出しの上限は extensions が送る価格上限（`provider.max_price.prompt`）だけで決まります。バインディングはその上限をモデルの `ceiling_input` まで下げて送り、上限のない呼び出しは `P_MONEY_NO_UPPER_BOUND` で拒否します。batch や video の submit は結果が後から届くため、hold がそのまま請求されます。アップロード済みのファイルにリクエストを持つ OpenAI の batch は `P_MONEY_UNMODELED` で拒否します。
+  - 価格付きの Program バインディングは、エンドポイント呼び出しを provider の model catalogue に対する SDK の準備済み呼び出しの上限（`sp::runtime::endpoint_worst_case_cost`）で hold し、provider が報告したコストで、なければ結果に対する SDK の見積もり（`sp::runtime::endpoint_estimate`）で精算します。SDK が上限なしとする理由ごとに、送信する前にその `P_MONEY_*` コードで呼び出しを拒否します。レコードの `pricing.endpoint` はエンドポイント、operation、上限の line を示します。ポリシーが provider は請求しないとする operation の呼び出し（poll、download、ファイル呼び出し、moderation）には価格を付けません。OpenRouter では embeddings 呼び出しの上限は extensions が送る価格上限（`provider.max_price.prompt`）だけで決まります。モデルの `ceiling_input` を超える上限は送信前にそこまで下げられ、上限のない呼び出しは `P_MONEY_NO_UPPER_BOUND` で拒否します。batch や video の submit は結果が後から届くため、hold がそのまま請求されます。アップロード済みのファイルにリクエストを持つ OpenAI の batch は `P_MONEY_UNMODELED` で拒否します。
   - Strict ランタイムのインターポジションはチャット呼び出しだけを対象とするため、エンドポイントノードは迂回させずに拒否します。
   - 実行のキャンセルトークンと deadline は呼び出しに届きます。
 

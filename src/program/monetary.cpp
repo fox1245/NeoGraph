@@ -717,9 +717,9 @@ namespace {
 bool assumption_is_conservative(std::string_view rule) noexcept {
     return rule == "cache_read at input" || rule == "cache_read at cache_read_audio" ||
            rule == "cache_write at cache_write_1h" || rule == "output at output_image" ||
-           rule == "route ceiling" || rule == "input at input_image" ||
-           rule == "cache_read at input_image" || rule == "cache_write at input_image" ||
-           rule.ends_with(" at the request's bound");
+           rule == "route ceiling" || rule == "input at the pin" ||
+           rule == "input at input_image" || rule == "cache_read at input_image" ||
+           rule == "cache_write at input_image" || rule.ends_with(" at the request's bound");
 }
 
 bool assumption_may_undercount(std::string_view rule) noexcept {
