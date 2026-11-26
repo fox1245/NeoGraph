@@ -730,12 +730,16 @@ bool assumption_may_undercount(std::string_view rule) noexcept {
 // estimate of its typed result from the facts it was prepared with, else its hold.
 ProgramMonetaryRecord settle_endpoint_amount(const MonetaryQuote& quote, const MonetaryCallSite& site,
                                              const sp::Outcome& outcome, const sp::Completion& completion) {
-    if (const auto reported = reported_cost_microunits(completion.usage.provider_cost)) {
-        auto record       = base_record(quote, site);
-        record.evidence   = ProgramMonetaryEvidence::Reported;
-        record.microunits = *reported;
-        record.basis      = "provider_reported";
-        return record;
+    if (completion.usage.stage == sp::UsageStage::Partial)
+        return held_record(quote, site, "incomplete_usage");
+    if (completion.usage.stage == sp::UsageStage::Final) {
+        if (const auto reported = reported_cost_microunits(completion.usage.provider_cost)) {
+            auto record       = base_record(quote, site);
+            record.evidence   = ProgramMonetaryEvidence::Reported;
+            record.microunits = *reported;
+            record.basis      = "provider_reported";
+            return record;
+        }
     }
     if (!quote.catalogue) return held_record(quote, site, "the hold names no catalogue");
     if (!quote.endpoint_payload || !quote.endpoint_facts)
