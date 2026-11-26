@@ -1132,6 +1132,76 @@ TEST(PricingSettle, AnEndpointEstimateMarksConservativeAndUndercountAssumptions)
     EXPECT_FALSE(plain_rec->may_undercount);
 }
 
+TEST(PricingSettle, AGatewayEndpointEstimateAtThePinMarksConservativeAndUndercount) {
+    neograph::test::FixtureModel gw_embed{"openai.chat", "vendor/embed-pin", 1'000};
+    gw_embed.pricing = json{{"input", "0.00002"}, {"ceiling_input", "0.00003"}};
+    auto provider    = provider_at("openai.chat", std::string(kOpenRouter), {std::move(gw_embed)});
+
+    const auto parse_doc = [](std::string_view text) {
+        auto parsed = sp::json::parse(text);
+        auto* doc   = std::get_if<sp::json::Document>(&parsed);
+        if (!doc) throw std::runtime_error("invalid extensions document");
+        return std::make_shared<const sp::json::Document>(std::move(*doc));
+    };
+    const auto make_usage = [](std::uint64_t tokens) {
+        auto u            = neograph::test::usage(tokens, std::nullopt, tokens);
+        u.input_uncached  = count(tokens);
+        u.quality         = sp::UsageQuality::Consistent;
+        return u;
+    };
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+
+    // Price cap below the entry's listed rate: tokens are billed at the pin (`input at the pin`) and conservative.
+    {
+        sp::embeddings::Request req;
+        req.model      = "vendor/embed-pin";
+        req.inputs.push_back({"hello"});
+        req.extensions = parse_doc(R"({"provider":{"max_price":{"prompt":10}}})");
+        const auto prepared =
+            program::detail::prepare_priced_call(*provider, make_endpoint_request(std::move(req)), true);
+        ASSERT_TRUE(prepared.quote);
+        ASSERT_TRUE(prepared.quote->blocker.empty()) << prepared.quote->blocker_message;
+        EXPECT_TRUE(prepared.quote->route_ceiling);
+        EXPECT_EQ(prepared.quote->hold, 10'000U);
+        EXPECT_EQ(prepared.quote->hold_basis, "route_ceiling");
+
+        const auto rec = program::detail::settle_monetary_call(
+            *prepared.quote, site, neograph::test::success("answer", make_usage(100)));
+        ASSERT_TRUE(rec);
+        EXPECT_EQ(rec->evidence, ProgramMonetaryEvidence::Estimated);
+        EXPECT_EQ(rec->microunits, 1'000U);
+        EXPECT_TRUE(names_assumption(*rec, "listed rates")) << rec->pricing.dump();
+        EXPECT_TRUE(names_assumption(*rec, "input at the pin")) << rec->pricing.dump();
+        EXPECT_TRUE(rec->conservative);
+        EXPECT_TRUE(rec->may_undercount);
+    }
+
+    // Price cap above the listed rate: settled at the listed rate without pinning input (`conservative == false`).
+    {
+        sp::embeddings::Request req;
+        req.model      = "vendor/embed-pin";
+        req.inputs.push_back({"hello"});
+        req.extensions = parse_doc(R"({"provider":{"max_price":{"prompt":25}}})");
+        const auto prepared =
+            program::detail::prepare_priced_call(*provider, make_endpoint_request(std::move(req)), true);
+        ASSERT_TRUE(prepared.quote);
+        ASSERT_TRUE(prepared.quote->blocker.empty()) << prepared.quote->blocker_message;
+        EXPECT_TRUE(prepared.quote->route_ceiling);
+        EXPECT_EQ(prepared.quote->hold, 25'000U);
+        EXPECT_EQ(prepared.quote->hold_basis, "route_ceiling");
+
+        const auto rec = program::detail::settle_monetary_call(
+            *prepared.quote, site, neograph::test::success("answer", make_usage(100)));
+        ASSERT_TRUE(rec);
+        EXPECT_EQ(rec->evidence, ProgramMonetaryEvidence::Estimated);
+        EXPECT_EQ(rec->microunits, 2'000U);
+        EXPECT_TRUE(names_assumption(*rec, "listed rates")) << rec->pricing.dump();
+        EXPECT_FALSE(names_assumption(*rec, "input at the pin")) << rec->pricing.dump();
+        EXPECT_FALSE(rec->conservative);
+        EXPECT_TRUE(rec->may_undercount);
+    }
+}
+
 TEST(PricingSettle, ByokAddsTheUpstreamCharge) {
     sp::ProviderReportedCost cost;
     cost.source      = sp::CostSource::OpenRouterUsd;

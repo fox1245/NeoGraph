@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d276ab30960726450ab11521160f2937a7dcd2a9a239abbc444910c581779882 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2800,7 +2800,7 @@ The library pre-registers the following components:
   - 호출이 보고한 토큰 사용량은 실행의 사용량에 더해진다. 사용량을 보고하지 않는 호출(moderation, 다운로드)은 아무것도 더하지 않으므로, 실행의 다른 호출이 남긴 합계를 지우지 않는다.
   - 호출은 채팅 호출이 거치는 경로를 따른다(`make_endpoint_request`). 실행의 provider 호출 broker가 이를 저널에 남기고 재생하며, Program에서는 호스트가 `add_core_endpoint_node`로 노드를 등록한다.
   - 모델 토큰 예산이나 managed budget lease는 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부한다.
-  - 가격을 매기는 Program binding은 엔드포인트 호출을 provider의 model catalogue에 대한 SDK의 준비된 호출 상한(`sp::runtime::endpoint_worst_case_cost`)으로 hold하고, provider가 보고한 비용으로, 없으면 결과에 대한 SDK의 추정(`sp::runtime::endpoint_estimate`)으로 정산한다. SDK가 상한이 없다고 주는 이유마다 호출을 보내기 전에 그 `P_MONEY_*` 코드로 거부한다. 레코드의 `pricing.endpoint`는 엔드포인트, operation, 상한의 line을 담는다. 정책이 provider가 청구하지 않는다고 밝힌 operation의 호출(poll, download, 파일 호출, moderation)에는 가격을 매기지 않는다. OpenRouter에서 embeddings 호출은 extensions가 보내는 가격 상한(`provider.max_price.prompt`)으로만 상한이 정해진다. binding은 그 상한을 모델의 `ceiling_input`으로 낮춰 보내고, 상한이 없는 호출은 `P_MONEY_NO_UPPER_BOUND`로 거부한다. batch나 video submit은 결과가 나중에 오므로 hold가 그대로 청구된다. 업로드된 파일에 요청들이 들어 있는 OpenAI batch는 `P_MONEY_UNMODELED`로 거부한다.
+  - 가격을 매기는 Program binding은 엔드포인트 호출을 provider의 model catalogue에 대한 SDK의 준비된 호출 상한(`sp::runtime::endpoint_worst_case_cost`)으로 hold하고, provider가 보고한 비용으로, 없으면 결과에 대한 SDK의 추정(`sp::runtime::endpoint_estimate`)으로 정산한다. SDK가 상한이 없다고 주는 이유마다 호출을 보내기 전에 그 `P_MONEY_*` 코드로 거부한다. 레코드의 `pricing.endpoint`는 엔드포인트, operation, 상한의 line을 담는다. 정책이 provider가 청구하지 않는다고 밝힌 operation의 호출(poll, download, 파일 호출, moderation)에는 가격을 매기지 않는다. OpenRouter에서 embeddings 호출은 extensions가 보내는 가격 상한(`provider.max_price.prompt`)으로만 상한이 정해진다. 모델의 `ceiling_input`을 넘는 상한은 호출을 보내기 전에 그 값으로 낮춰지며, 상한이 없는 호출은 `P_MONEY_NO_UPPER_BOUND`로 거부한다. batch나 video submit은 결과가 나중에 오므로 hold가 그대로 청구된다. 업로드된 파일에 요청들이 들어 있는 OpenAI batch는 `P_MONEY_UNMODELED`로 거부한다.
   - Strict Runtime 인터포지션은 채팅 호출만 대상으로 하므로, 엔드포인트 노드가 우회되도록 두지 않고 거부한다.
   - 실행의 취소 토큰과 deadline은 호출에 전달된다.
 

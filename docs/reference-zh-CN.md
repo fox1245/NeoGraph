@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d276ab30960726450ab11521160f2937a7dcd2a9a239abbc444910c581779882 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2756,7 +2756,7 @@ public:
   - 调用报告的 token 用量会计入运行的用量。不报告用量的调用（moderation、下载）不计入任何内容，因此不会抹去运行中其他调用的合计。
   - 这些调用走聊天调用所走的路径（`make_endpoint_request`）。运行的 provider 调用 broker 会把它们记入 journal 并重放；在 Program 中，宿主用 `add_core_endpoint_node` 注册这些节点。
   - 模型 token 预算或 managed budget lease 会在发送之前拒绝端点调用，因为它没有输出上限。
-  - 计价的 Program 绑定以 SDK 对已准备调用在 provider 的 model catalogue 上给出的上限（`sp::runtime::endpoint_worst_case_cost`）hold 端点调用，并按 provider 报告的成本结算，没有时按 SDK 对其结果的估算（`sp::runtime::endpoint_estimate`）结算。SDK 给出的每个无上限原因都会在发送之前以相应的 `P_MONEY_*` 代码拒绝该调用。记录的 `pricing.endpoint` 写明端点、operation 和上限的各行。策略声明 provider 不计费的 operation 的调用（poll、download、文件调用、moderation）不计价。在 OpenRouter 上，embeddings 调用的上限只由其 extensions 发送的价格上限（`provider.max_price.prompt`）决定：绑定把该上限降到模型的 `ceiling_input` 再发送，没有上限的调用以 `P_MONEY_NO_UPPER_BOUND` 拒绝。batch 或 video 的 submit 的结果稍后才到，因此按其 hold 计费。其请求位于已上传文件中的 OpenAI batch 以 `P_MONEY_UNMODELED` 拒绝。
+  - 计价的 Program 绑定以 SDK 对已准备调用在 provider 的 model catalogue 上给出的上限（`sp::runtime::endpoint_worst_case_cost`）hold 端点调用，并按 provider 报告的成本结算，没有时按 SDK 对其结果的估算（`sp::runtime::endpoint_estimate`）结算。SDK 给出的每个无上限原因都会在发送之前以相应的 `P_MONEY_*` 代码拒绝该调用。记录的 `pricing.endpoint` 写明端点、operation 和上限的各行。策略声明 provider 不计费的 operation 的调用（poll、download、文件调用、moderation）不计价。在 OpenRouter 上，embeddings 调用的上限只由其 extensions 发送的价格上限（`provider.max_price.prompt`）决定：高于模型 `ceiling_input` 的上限会在发送前降到该值，没有上限的调用以 `P_MONEY_NO_UPPER_BOUND` 拒绝。batch 或 video 的 submit 的结果稍后才到，因此按其 hold 计费。其请求位于已上传文件中的 OpenAI batch 以 `P_MONEY_UNMODELED` 拒绝。
   - 严格的运行时拦截只处理聊天调用，所以它会拒绝端点节点，而不是被绕过。
   - 运行的取消 token 和 deadline 会传到该调用。
 
