@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -478,7 +478,7 @@ dispatch の前に broker は、provider の descriptor ポリシーが持つ Sc
 
 価格付き binding のエンドポイント呼び出し（embeddings、batch、その他の SchemaProvider のエンドポイント呼び出し）は、同じカタログに対して準備済み呼び出しの `Provider::endpoint_worst_case_cost` で hold され、整数 microunit に切り上げられます。SDK が上限を与えない場合は、上の表のコードで拒否されます。精算は provider が報告した費用で、なければ結果に対する SDK の推定（`sp::runtime::endpoint_estimate`）で行い、`estimated` として請求します。SDK が推定を持たない結果、価格を付けられない単位、または provider の請求額を下回りうる推定では、hold を `held` として請求します。ポリシーが請求されないと示す operation の呼び出し（poll、download、ファイル呼び出し、moderation）は、hold なしで送られ、monetary の記録を残しません。
 
-結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（項目、その価格行、service tier、予約したツールの使用、推定の前提）、`served_by`（呼び出しを処理したアップストリーム、後述）、`billed_tier`（呼び出しが請求される tier、後述）です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
+結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（項目、その価格行、service tier、予約したツールの使用、推定の前提、エンドポイント呼び出しではエンドポイント・operation・上限の line を示す `endpoint`）、`served_by`（呼び出しを処理したアップストリーム、後述）、`billed_tier`（呼び出しが請求される tier、後述）です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
 
 | 証拠 | 条件 | 金額 |
 |---|---|---|
