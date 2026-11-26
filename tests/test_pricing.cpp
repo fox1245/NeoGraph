@@ -1202,6 +1202,61 @@ TEST(PricingSettle, AGatewayEndpointEstimateAtThePinMarksConservativeAndUndercou
     }
 }
 
+TEST(PricingSettle, AnEndpointCompletionOnlyTrustsReportedCostWhenUsageIsFinal) {
+    neograph::test::FixtureModel embed{"openai.chat", "embed-stage", 1'000};
+    embed.pricing = json{{"input", "0.000001"}};
+    auto provider = provider_at("openai.chat", "https://api.openai.com", {std::move(embed)});
+
+    sp::embeddings::Request req;
+    req.model = "embed-stage";
+    req.inputs.push_back({"hello"});
+    const auto prepared_call =
+        program::detail::prepare_priced_call(*provider, make_endpoint_request(std::move(req)), true);
+    ASSERT_TRUE(prepared_call.quote);
+    ASSERT_TRUE(prepared_call.quote->blocker.empty()) << prepared_call.quote->blocker_message;
+    const auto& quote = *prepared_call.quote;
+    ASSERT_EQ(quote.hold, 1'000U);
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+
+    sp::ProviderReportedCost cost;
+    cost.source      = sp::CostSource::OpenRouterUsd;
+    cost.total       = sp::UsdAmount{50'000};
+    cost.status[0]   = sp::CostStatus::Available;
+    cost.is_byok     = false;
+    cost.byok_status = sp::CostStatus::Available;
+
+    // Partial usage (such as a running gateway batch) must remain Held even with provider_cost populated.
+    auto partial          = neograph::test::usage(100, std::nullopt, 100, sp::UsageStage::Partial);
+    partial.provider_cost = cost;
+    const auto partial_rec =
+        program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", std::move(partial)));
+    ASSERT_TRUE(partial_rec);
+    EXPECT_EQ(partial_rec->evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(partial_rec->microunits, quote.hold);
+    EXPECT_EQ(partial_rec->reason, "incomplete_usage");
+
+    // Missing usage bypasses reported_cost_microunits and proceeds to endpoint estimation (which holds without input).
+    sp::Usage missing;
+    missing.stage         = sp::UsageStage::Missing;
+    missing.provider_cost = cost;
+    const auto missing_rec =
+        program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", std::move(missing)));
+    ASSERT_TRUE(missing_rec);
+    EXPECT_EQ(missing_rec->evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(missing_rec->microunits, quote.hold);
+    EXPECT_NE(missing_rec->reason, "incomplete_usage");
+
+    // Final usage with available provider_cost settles as Reported.
+    auto final_usage          = neograph::test::usage(100, std::nullopt, 100, sp::UsageStage::Final);
+    final_usage.provider_cost = cost;
+    const auto final_rec =
+        program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", std::move(final_usage)));
+    ASSERT_TRUE(final_rec);
+    EXPECT_EQ(final_rec->evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(final_rec->microunits, 50U);
+    EXPECT_EQ(final_rec->basis, "provider_reported");
+}
+
 TEST(PricingSettle, ByokAddsTheUpstreamCharge) {
     sp::ProviderReportedCost cost;
     cost.source      = sp::CostSource::OpenRouterUsd;
