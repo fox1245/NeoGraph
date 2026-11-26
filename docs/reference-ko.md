@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -507,7 +507,7 @@ dispatch 전에 broker는 provider descriptor 정책의 SchemaProvider 모델 �
 
 가격을 매기는 binding의 엔드포인트 호출(embeddings, batch, 그 밖의 SchemaProvider 엔드포인트 호출)은 같은 카탈로그에 대해 준비된 호출의 `Provider::endpoint_worst_case_cost`로 hold하며, 정수 microunit으로 올림한다. SDK가 상한을 주지 않으면 위 표의 코드로 거부된다. 정산은 provider가 보고한 비용으로, 없으면 결과에 대한 SDK의 추정(`sp::runtime::endpoint_estimate`)으로 하며 `estimated`로 청구한다. SDK가 추정을 갖지 않는 결과, 가격을 매길 수 없는 단위, 또는 provider가 청구한 금액보다 낮을 수 있는 추정은 hold를 `held`로 청구한다. 정책이 청구하지 않는다고 밝힌 operation의 호출(poll, download, 파일 호출, moderation)은 hold 없이 보내며 monetary 기록을 남기지 않는다.
 
-결과가 나오면 hold는 정확히 한 번 정산되고, attempt의 `ProgramResult::monetary_records()`(Python `result.monetary_records`)에 호출마다 `ProgramMonetaryRecord` 하나가 생긴다. 필드는 `call_id`(journal의 논리 호출 slot), `operation_id`, `node`, `origin`(base URL), `model`, `evidence`, `microunits`, `reserved_microunits`, `basis`, `catalog_version`, `catalog_digest`, `conservative`, `may_undercount`, `replayed`, `reason`, `pricing`(항목, 그 가격 행, service tier, 예약된 도구 사용, 추정의 가정), `served_by`(호출을 처리한 업스트림, 아래), `billed_tier`(호출이 청구되는 tier, 아래)이다. `ProgramUsage::monetary_microunits`는 attempt의 청구액과 아직 열린 hold의 합이다.
+결과가 나오면 hold는 정확히 한 번 정산되고, attempt의 `ProgramResult::monetary_records()`(Python `result.monetary_records`)에 호출마다 `ProgramMonetaryRecord` 하나가 생긴다. 필드는 `call_id`(journal의 논리 호출 slot), `operation_id`, `node`, `origin`(base URL), `model`, `evidence`, `microunits`, `reserved_microunits`, `basis`, `catalog_version`, `catalog_digest`, `conservative`, `may_undercount`, `replayed`, `reason`, `pricing`(항목, 그 가격 행, service tier, 예약된 도구 사용, 추정의 가정, 엔드포인트 호출에서는 엔드포인트·operation·상한의 line을 담는 `endpoint`), `served_by`(호출을 처리한 업스트림, 아래), `billed_tier`(호출이 청구되는 tier, 아래)이다. `ProgramUsage::monetary_microunits`는 attempt의 청구액과 아직 열린 hold의 합이다.
 
 | 증거 | 조건 | 금액 |
 |---|---|---|

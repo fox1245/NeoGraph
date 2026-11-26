@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=e7a3fa0f16d1cf02f724bc579f50a7aca33f095717f01326b05b5a3a4ae803bf -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=74ceb1f44ad5ce09d9f59eb7ff6ca733282516025c31aac9cbeec83ee47d195e -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -508,7 +508,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 
 计价绑定的端点调用（embeddings、batch 及其他 SchemaProvider 端点调用）按已准备调用的 `Provider::endpoint_worst_case_cost` 在同一目录上 hold，向上取整到整数 microunit。SDK 不给出上限时，以上表中的代码拒绝。结算按 provider 报告的费用，没有则按 SDK 对其结果的估算（`sp::runtime::endpoint_estimate`），以 `estimated` 计费；SDK 没有估算的结果、无法计价的单位，或可能低于 provider 实际计费的估算，则按 hold 以 `held` 计费。策略标明不计费的 operation 的调用（poll、download、文件调用、moderation）不带 hold 发送，也不留下 monetary 记录。
 
-得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（条目、其价格行、service tier、预留的工具使用和估算的假设）、`served_by`（处理该调用的上游，见下）与 `billed_tier`（该调用计费所在的 tier，见下）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
+得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（条目、其价格行、service tier、预留的工具使用、估算的假设，以及对于端点调用写明端点、operation 和上限各行的 `endpoint`）、`served_by`（处理该调用的上游，见下）与 `billed_tier`（该调用计费所在的 tier，见下）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
 
 | 证据 | 条件 | 金额 |
 |---|---|---|

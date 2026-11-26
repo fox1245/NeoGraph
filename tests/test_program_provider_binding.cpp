@@ -3361,6 +3361,32 @@ TEST(ProgramProviderBindingJournal, AnEndpointCallIsRefusedWhenTheLinkedLibraryD
     EXPECT_TRUE(result.monetary_records().empty());
 }
 
+TEST(ProgramProviderBindingJournal, AnUnbilledEndpointCallSucceedsWhenTheLinkedLibraryDoesNotBoundEndpointCalls) {
+    // The policy states that a file upload is not billed: a priced binding sends unbilled endpoint calls even when
+    // the linked library does not grant EndpointCostBounds, holding and recording nothing.
+    struct Linked {
+        Linked() {
+            program::detail::set_linked_capabilities_for_testing(sp::runtime::interface_contract().capabilities &
+                                                                 ~sp::capability::EndpointCostBounds);
+        }
+        ~Linked() { program::detail::set_linked_capabilities_for_testing(std::nullopt); }
+    } linked;
+    TempDir                               files("endpoint-upload-unlinked");
+    neograph::test::endpoints::UploadPeer peer;
+    auto options     = endpoint_options(peer.origin());
+    options.priced   = true;
+    options.monetary = 100'000;
+    Host h(std::make_shared<Peer>(), options, &files);
+    h.script().upload_bytes = "bytes in memory";
+    const auto done = h.run(Shape::FileUpload, "upload-unlinked");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.received(), std::vector<std::string>{"bytes in memory"});
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+    EXPECT_TRUE(done.monetary_records().empty());
+    EXPECT_EQ(done.usage().monetary_microunits, 0U);
+    EXPECT_EQ(done.remaining_budget().monetary_microunits, options.monetary);
+}
+
 TEST(ProgramProviderBindingJournal, ARecoveredRunChargesItsJournaledEmbeddingCallAsStored) {
     // The run dies after its embedding call is journaled. Recovery does not send the call again: it charges the record
     // the call was settled with, as the journal stored it.

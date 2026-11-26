@@ -229,8 +229,9 @@ TEST(SchemaProviderInterface, LinkedAbiGateAdmitsRealPreparedDispatch) {
         EXPECT_NE(sp::runtime::interface_contract().capabilities & bit, 0U);
         EXPECT_NE(sp::capability::RequiredProvider & bit, 0U);
     }
-    // The linked library bounds endpoint calls by their cost, but NeoGraph does not admit an endpoint call by bound,
-    // so the bit stays out of what it requires, as do the host seam and the host archive custody it never needs.
+    // The linked library bounds endpoint calls by their cost, and priced Program bindings check EndpointCostBounds
+    // when admitting a billed endpoint call rather than requiring it to construct a provider, so the bit stays out of
+    // RequiredProvider alongside the host seam and the host archive custody.
     EXPECT_NE(sp::runtime::interface_contract().capabilities & sp::capability::EndpointCostBounds, 0U);
     for (const auto bit : {sp::capability::HostSeam, sp::capability::HostArchiveCustody,
                            sp::capability::EndpointCostBounds}) {

@@ -1073,6 +1073,65 @@ TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
     EXPECT_EQ(held->pricing, quote.pricing);
 }
 
+TEST(PricingSettle, AnEndpointEstimateMarksConservativeAndUndercountAssumptions) {
+    neograph::test::FixtureModel embed{"openai.chat", "embed-assumptions", 1'000};
+    embed.pricing = json{{"input", "0.000001"}, {"cache_write", "0.000002"}};
+    auto provider = provider_at("openai.chat", "https://api.openai.com", {std::move(embed)});
+
+    sp::embeddings::Request embed_request;
+    embed_request.model = "embed-assumptions";
+    embed_request.inputs.push_back({"hello"});
+    const auto prepared_call = program::detail::prepare_priced_call(
+        *provider, make_endpoint_request(std::move(embed_request)), true);
+    ASSERT_TRUE(prepared_call.quote);
+    ASSERT_TRUE(prepared_call.quote->blocker.empty()) << prepared_call.quote->blocker_message;
+    const auto& quote = *prepared_call.quote;
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+
+    const auto make_usage = [](std::uint64_t input_uncached, std::uint64_t cache_read, std::uint64_t cache_write) {
+        const auto total = input_uncached + cache_read + cache_write;
+        auto       u     = neograph::test::usage(total, std::nullopt, total);
+        u.input_uncached = count(input_uncached);
+        if (cache_read) u.cache_read = count(cache_read);
+        if (cache_write) u.cache_write = count(cache_write);
+        u.quality = sp::UsageQuality::Consistent;
+        return u;
+    };
+
+    // Cached reads fall back to `input` when `cache_read` is omitted, marking the estimate conservative.
+    const auto conservative_rec = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", make_usage(100, 50, 0)));
+    ASSERT_TRUE(conservative_rec);
+    EXPECT_EQ(conservative_rec->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(conservative_rec->microunits, 150U);
+    EXPECT_TRUE(names_assumption(*conservative_rec, "cache_read at input")) << conservative_rec->pricing.dump();
+    EXPECT_TRUE(conservative_rec->conservative);
+    EXPECT_FALSE(conservative_rec->may_undercount);
+
+    // 1-hour cache writes fall back to `cache_write` when `cache_write_1h` is omitted, marking may_undercount.
+    auto hour_fallback                                              = make_usage(100, 0, 50);
+    hour_fallback.extra["cache_creation.ephemeral_5m_input_tokens"] = count(0);
+    hour_fallback.extra["cache_creation.ephemeral_1h_input_tokens"] = count(50);
+    const auto undercount_rec                                       = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", std::move(hour_fallback)));
+    ASSERT_TRUE(undercount_rec);
+    EXPECT_EQ(undercount_rec->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(undercount_rec->microunits, (100U * 1'000 + 50U * 2'000) / 1'000);
+    EXPECT_TRUE(names_assumption(*undercount_rec, "cache_write_1h at cache_write"))
+        << undercount_rec->pricing.dump();
+    EXPECT_FALSE(undercount_rec->conservative);
+    EXPECT_TRUE(undercount_rec->may_undercount);
+
+    // Plain input tokens without assumptions leave both flags false.
+    const auto plain_rec = program::detail::settle_monetary_call(
+        quote, site, neograph::test::success("answer", make_usage(100, 0, 0)));
+    ASSERT_TRUE(plain_rec);
+    EXPECT_EQ(plain_rec->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(plain_rec->microunits, 100U);
+    EXPECT_FALSE(plain_rec->conservative);
+    EXPECT_FALSE(plain_rec->may_undercount);
+}
+
 TEST(PricingSettle, ByokAddsTheUpstreamCharge) {
     sp::ProviderReportedCost cost;
     cost.source      = sp::CostSource::OpenRouterUsd;

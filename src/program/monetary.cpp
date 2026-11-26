@@ -408,6 +408,13 @@ json endpoint_pricing(const sp::EndpointFacts& facts, const sp::pricing::Endpoin
 
 // Holds the endpoint call `quote` at the SDK's bound of the prepared call.
 void assess_endpoint_call(MonetaryQuote& quote, const PreparedProviderRequest& prepared) {
+    const auto& facts    = Provider::endpoint_facts(prepared);
+    quote.endpoint_facts = facts;
+    quote.witness["endpoint"]  = facts.endpoint;
+    quote.witness["operation"] = facts.operation;
+    quote.billed_tier =
+        facts.billing == sp::descriptor::EndpointBilling::Carried ? facts.carried_tier : facts.service_tier;
+    if (facts.billing == sp::descriptor::EndpointBilling::None) return;
     // A library built before the endpoint cost bounds answers every billed endpoint call without one, so the bound
     // is read only from a library that grants them.
     if ((linked_capabilities() & sp::capability::EndpointCostBounds) == 0) {
@@ -416,12 +423,6 @@ void assess_endpoint_call(MonetaryQuote& quote, const PreparedProviderRequest& p
               "the linked SchemaProvider library does not bound endpoint calls (capability EndpointCostBounds)");
         return;
     }
-    const auto& facts    = Provider::endpoint_facts(prepared);
-    quote.endpoint_facts = facts;
-    quote.witness["endpoint"]  = facts.endpoint;
-    quote.witness["operation"] = facts.operation;
-    quote.billed_tier =
-        facts.billing == sp::descriptor::EndpointBilling::Carried ? facts.carried_tier : facts.service_tier;
     if (!facts.input_file.empty()) {
         // An OpenAI batch submit: its requests are lines of an uploaded file, which the submit does not carry.
         quote.witness["unmodeled"] = "batch requests in an uploaded file";
@@ -713,6 +714,18 @@ std::optional<std::uint64_t> reported_cost_microunits(const sp::ProviderReported
 
 namespace {
 
+bool assumption_is_conservative(std::string_view rule) noexcept {
+    return rule == "cache_read at input" || rule == "cache_read at cache_read_audio" ||
+           rule == "cache_write at cache_write_1h" || rule == "output at output_image" ||
+           rule == "route ceiling" || rule == "input at input_image" ||
+           rule == "cache_read at input_image" || rule == "cache_write at input_image" ||
+           rule.ends_with(" at the request's bound");
+}
+
+bool assumption_may_undercount(std::string_view rule) noexcept {
+    return rule == "cache_write at input" || rule == "cache_write_1h at cache_write";
+}
+
 // The record of one dispatched endpoint call's completed outcome: the provider's reported cost, else the SDK's
 // estimate of its typed result from the facts it was prepared with, else its hold.
 ProgramMonetaryRecord settle_endpoint_amount(const MonetaryQuote& quote, const MonetaryCallSite& site,
@@ -736,9 +749,13 @@ ProgramMonetaryRecord settle_endpoint_amount(const MonetaryQuote& quote, const M
     record.evidence   = ProgramMonetaryEvidence::Estimated;
     record.microunits = ceil_microunits(estimate->total->nano_usd);
     record.basis      = quote.hold_basis;
+    record.conservative =
+        std::any_of(estimate->assumptions.begin(), estimate->assumptions.end(), assumption_is_conservative);
     // At a routing gateway the estimate takes the entry's listed rates, and the endpoint the gateway chose may bill
     // more, up to the cap the request was held at.
-    record.may_undercount = quote.route_ceiling;
+    record.may_undercount =
+        quote.route_ceiling ||
+        std::any_of(estimate->assumptions.begin(), estimate->assumptions.end(), assumption_may_undercount);
     if (estimate->entry != quote.pricing.value("entry", std::string())) {
         // The served model's entry priced the call.
         const auto* entry = quote.catalogue->entry(estimate->entry);
@@ -791,14 +808,11 @@ std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       qu
     record.evidence        = ProgramMonetaryEvidence::Estimated;
     record.microunits      = ceil_microunits(nano);
     record.basis           = quote.hold_basis;
-    const auto assumed = [&](std::string_view rule) {
-        return std::find(estimate.assumptions.begin(), estimate.assumptions.end(), rule) != estimate.assumptions.end();
-    };
-    record.conservative = quote.tool_fees_nano_usd != 0 || assumed("cache_read at input") ||
-                          assumed("cache_write at cache_write_1h") || assumed("output at output_image") ||
-                          assumed("route ceiling") || assumed("input at input_image") ||
-                          assumed("cache_read at input_image") || assumed("cache_write at input_image");
-    record.may_undercount = assumed("cache_write at input") || assumed("cache_write_1h at cache_write");
+    record.conservative    = quote.tool_fees_nano_usd != 0 ||
+                             std::any_of(estimate.assumptions.begin(), estimate.assumptions.end(),
+                                         assumption_is_conservative);
+    record.may_undercount =
+        std::any_of(estimate.assumptions.begin(), estimate.assumptions.end(), assumption_may_undercount);
     if (estimate.entry != quote.pricing.value("entry", std::string())) {
         // The served model's entry priced the call.
         const auto* entry = quote.catalogue->entry(estimate.entry);
